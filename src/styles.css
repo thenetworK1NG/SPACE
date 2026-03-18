@@ -1,0 +1,15 @@
+html,body { height:100%; margin:0; background:#000; color:#fff; font-family:Arial,Helvetica,sans-serif; overflow:hidden }
+#hud { position:fixed; top:12px; left:12px; z-index:10 }
+#startBtn { padding:8px 12px; font-size:14px }
+#instructions { margin-top:8px; opacity:0.85; font-size:13px }
+canvas { display:block; width:100%; height:100vh }
+
+/* Ship stats overlay */
+#ship-stats { position:fixed; right:12px; top:12px; width:320px; background:rgba(2,8,14,0.85); border:1px solid rgba(255,255,255,0.06); padding:12px; border-radius:8px; box-shadow:0 6px 20px rgba(0,0,0,0.6); font-family:Arial,Helvetica,sans-serif; color:#e6f7ff }
+.stats-header { font-weight:700; margin-bottom:8px; font-size:15px }
+.stat-row { display:flex; align-items:center; gap:8px; margin:6px 0 }
+.stat-name { flex:1; font-size:13px; opacity:0.95 }
+.stat-bar { width:110px; height:10px; background:rgba(255,255,255,0.06); border-radius:6px; overflow:hidden; border:1px solid rgba(255,255,255,0.03) }
+.stat-fill { height:100%; background:linear-gradient(90deg,#6fe7d7,#3aa6ff); transition:width 0.6s ease }
+.stat-pct { width:36px; text-align:right; font-size:12px; opacity:0.95 }
+.stats-hint { margin-top:8px; font-size:12px; opacity:0.8; text-align:right }
