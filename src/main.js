@@ -2,6 +2,7 @@ import * as THREE from 'https://esm.sh/three@0.152.2';
 import { PointerLockControls } from 'https://esm.sh/three@0.152.2/examples/jsm/controls/PointerLockControls.js';
 import { GLTFLoader } from 'https://esm.sh/three@0.152.2/examples/jsm/loaders/GLTFLoader.js';
 import ShipSystems from './shipSystems.js';
+import AudioSystem from './audioSystem.js';
 
 const canvas = document.createElement('canvas');
 document.body.appendChild(canvas);
@@ -110,6 +111,13 @@ if (!exitInteriorBtn) {
 const shipSystems = new ShipSystems();
 shipSystems.start();
 
+// Audio system: lazy-init on first user gesture so browsers allow playback.
+const audioSystem = new AudioSystem();
+// initialize audio on the first user click (one-time listener)
+document.addEventListener('click', function _initAudioOnce() {
+  try { audioSystem.init(); } catch (e) { console.warn('audio init failed', e); }
+}, { once: true, capture: true });
+
 // Flashlight / darkness state (granted when circuits go below 50%)
 let sceneIsDark = false;
 let flashlight = null;
@@ -187,6 +195,7 @@ window.addEventListener('circuits:low', (ev) => {
     if (inventoryUI && inventoryUI.style.display === 'block') renderInventoryContents();
     try { interactHint.textContent = 'Power failure — systems offline'; interactHint.style.display = 'block'; setTimeout(() => { try { interactHint.style.display = 'none'; } catch(e){} }, 1500); } catch (e) {}
   } catch (err) { console.warn('Failed to grant flashlight', err); }
+  try { if (audioSystem) audioSystem.playOnce('poweroff'); } catch (e) {}
 });
 
 // When circuits are repaired above threshold, restore controls
@@ -195,6 +204,7 @@ window.addEventListener('circuits:restored', (ev) => {
   try { autopilotBtn.disabled = false; autopilotBtn.textContent = 'Autopilot: Off'; autopilotBtn.style.background = 'rgba(0,0,0,0.6)'; } catch (e) {}
   try { pilotDisabled = false; } catch (e) {}
   try { interactHint.textContent = 'Power restored'; interactHint.style.display = 'block'; setTimeout(() => { try { interactHint.style.display = 'none'; } catch(e){} }, 1200); } catch (e) {}
+  try { if (audioSystem) audioSystem.playOnce('powerup'); } catch (e) {}
 });
 
 // Animation and interaction helpers (for cabL / cabR)
@@ -1047,6 +1057,7 @@ loader.load('ship.glb', gltf => {
                     powerboxActions = [];
                     try { _startFlicker(false, 1400); _flickerTimers.push(setTimeout(() => { sceneIsDark = false; }, 1400)); } catch (e) {}
                     try { interactHint.textContent = 'Power restored'; setTimeout(() => { try { interactHint.style.display = 'none'; } catch(e){} }, 1200); } catch (e) {}
+                    try { if (audioSystem) audioSystem.playOnce('powerup'); } catch (e) {}
                     powerboxFinishTimer = null;
                   }, 3000);
                 }
@@ -1339,6 +1350,7 @@ document.addEventListener('keydown', e => {
             _flickerTimers.push(setTimeout(() => { sceneIsDark = false; }, 1400));
             interactHint.textContent = 'Power restored';
             setTimeout(() => { try { interactHint.style.display = 'none'; } catch (e) {} }, 1200);
+            try { if (audioSystem) audioSystem.playOnce('powerup'); } catch (e) {}
           } catch (e) { console.warn('Instant power restore failed', e); }
           return;
         }
@@ -1467,6 +1479,13 @@ function playInteraction(target) {
       console.warn('Failed to play interaction clip', err);
     }
   }
+  try {
+    if (audioSystem) {
+      const outsideFlag = !!(oxygenUI && oxygenUI.style && oxygenUI.style.display === 'block');
+      const isExit = owners.has(exitDoor);
+      audioSystem.playOnce('door', { muffled: Boolean(isExit && outsideFlag) });
+    }
+  } catch (e) {}
   owners.forEach(o => { try { o.userData.playing = true; } catch (e) {} });
 }
 
@@ -1498,6 +1517,14 @@ function playReverseBoth() {
       console.warn('Failed to play reverse clip', err);
     }
   }
+  try {
+    if (audioSystem) {
+      const outsideFlag = !!(oxygenUI && oxygenUI.style && oxygenUI.style.display === 'block');
+      // reverse both typically for cabL/cabR so not exit, but keep check
+      const isExit = false;
+      audioSystem.playOnce('door', { muffled: Boolean(isExit && outsideFlag) });
+    }
+  } catch (e) {}
 }
 
 function playReverseTarget(target) {
@@ -1516,6 +1543,13 @@ function playReverseTarget(target) {
       action.play();
     } catch (err) { console.warn('Failed to play reverse clip for target', err); }
   }
+  try {
+    if (audioSystem) {
+      const outsideFlag = !!(oxygenUI && oxygenUI.style && oxygenUI.style.display === 'block');
+      const isExit = (target === exitDoor);
+      audioSystem.playOnce('door', { muffled: Boolean(isExit && outsideFlag) });
+    }
+  } catch (e) {}
 }
 
 // Mixer finished handler: update per-cab flags and collisions
@@ -1591,6 +1625,11 @@ function animate(){
   // advance any animation mixers
   if (mixer) mixer.update(dt);
   if (powerboxMixer) powerboxMixer.update(dt);
+  // update audio state based on oxygen UI visibility (outside when oxygen UI shown)
+  try {
+    const outsideFlag = !!(oxygenUI && oxygenUI.style && oxygenUI.style.display === 'block');
+    if (audioSystem && audioSystem._inited) audioSystem.setOutside(outsideFlag);
+  } catch (e) {}
   // Smoothly approach target orientation (yaw/pitch kept even when not flying)
   yaw += (targetYaw - yaw) * Math.min(1, ROTATION_DAMPING * dt);
   pitch += (targetPitch - pitch) * Math.min(1, ROTATION_DAMPING * dt);
