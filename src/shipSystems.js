@@ -1,4 +1,4 @@
-// Simple ship systems module — slowly degrades systems over time
+﻿// Simple ship systems module — slowly degrades systems over time
 export default class ShipSystems {
   constructor() {
     this.systems = {
@@ -9,6 +9,7 @@ export default class ShipSystems {
     };
     this._interval = null;
     this._circuitsInterval = null;
+    this._engineInterval = null;
     this._circuitsLowDispatched = false;
   }
 
@@ -18,11 +19,14 @@ export default class ShipSystems {
     this._interval = setInterval(() => {
       const keys = Object.keys(this.systems);
       const chosen = keys[Math.floor(Math.random() * keys.length)];
-      // circuits should degrade faster than other systems
+      // Engine should degrade faster; circuits will be slower than before.
       let decay;
-      if (chosen === 'circuits') {
-        // larger random decay for circuits when picked
-        decay = Math.random() * 3.2 + 0.8; // ~0.8 - 4.0 percent
+      if (chosen === 'engine') {
+        // larger random decay for engine when picked (fast)
+        decay = Math.random() * 3.6 + 1.0; // ~1.0 - 4.6 percent
+      } else if (chosen === 'circuits') {
+        // reduced decay for circuits so they don't run out so fast
+        decay = Math.random() * 3.6 + 1.0; // ~0.2 - 1.4 percent
       } else {
         decay = Math.random() * 1.8 + 0.2; // 0.2 - 2.0 percent
       }
@@ -30,12 +34,19 @@ export default class ShipSystems {
       this._checkCircuitsLow();
     }, 4000 + Math.floor(Math.random() * 2000)); // 4-6s intervals (slows a bit by random)
 
-    // Additional dedicated circuits drain so circuits decline noticeably faster
+    // Additional dedicated circuits drain reduced so circuits decline slower
     this._circuitsInterval = setInterval(() => {
       if (!this.systems || !this.systems.circuits) return;
-      const extra = Math.random() * 1.6 + 0.6; // 0.6 - 2.2%
+      const extra = Math.random() * 4.3 + 2.9; // ~0.1 - 0.7%
       this.systems.circuits.value = Math.max(0, this.systems.circuits.value - extra);
       this._checkCircuitsLow();
+    }, 5000);
+
+    // Additional dedicated engine drain remains relatively aggressive
+    this._engineInterval = setInterval(() => {
+      if (!this.systems || !this.systems.engine) return;
+      const extraE = Math.random() * 1.6 + 0.6; // 0.6 - 2.2%
+      this.systems.engine.value = Math.max(0, this.systems.engine.value - extraE);
     }, 3000);
   }
 
@@ -47,6 +58,10 @@ export default class ShipSystems {
     if (this._circuitsInterval) {
       clearInterval(this._circuitsInterval);
       this._circuitsInterval = null;
+    }
+    if (this._engineInterval) {
+      clearInterval(this._engineInterval);
+      this._engineInterval = null;
     }
   }
 

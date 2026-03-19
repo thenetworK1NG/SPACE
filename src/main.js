@@ -1,8 +1,15 @@
 import * as THREE from 'https://esm.sh/three@0.152.2';
 import { PointerLockControls } from 'https://esm.sh/three@0.152.2/examples/jsm/controls/PointerLockControls.js';
 import { GLTFLoader } from 'https://esm.sh/three@0.152.2/examples/jsm/loaders/GLTFLoader.js';
+// Expose commonly-used three.js symbols on window for non-module helpers (shipEntry.js)
+try { window.THREE = THREE; window.PointerLockControls = PointerLockControls; window.GLTFLoader = GLTFLoader; } catch (e) {}
 import ShipSystems from './shipSystems.js';
 import AudioSystem from './audioSystem.js';
+import ShipRuntime from './shipRuntime.js';
+import * as Inventory from './inventory.js';
+import PlayerInventory from './playerInventory.js';
+import Flashlight from './flashlight.js';
+import { setupLocker, playLockerOpen, playLockerClose } from './animatedComponents.js';
 
 const canvas = document.createElement('canvas');
 document.body.appendChild(canvas);
@@ -66,28 +73,7 @@ if (!autopilotBtn) {
   autopilotBtn.textContent = 'Autopilot: Off';
   // Do not append to the document — keep as non-DOM placeholder so UI remains clean
 }
-// Button to re-open the freighter shop when near
-let freighterShopBtn = document.getElementById('freighterShopBtn');
-if (!freighterShopBtn) {
-  freighterShopBtn = document.createElement('button');
-  freighterShopBtn.id = 'freighterShopBtn';
-  freighterShopBtn.style.display = 'none';
-  freighterShopBtn.style.position = 'fixed';
-  freighterShopBtn.style.right = '12px';
-  freighterShopBtn.style.top = '12px';
-  freighterShopBtn.style.zIndex = 10006;
-  freighterShopBtn.style.padding = '8px 12px';
-  freighterShopBtn.style.background = 'rgba(0,0,0,0.6)';
-  freighterShopBtn.style.color = '#fff';
-  freighterShopBtn.style.border = '1px solid rgba(255,255,255,0.12)';
-  freighterShopBtn.style.borderRadius = '6px';
-  freighterShopBtn.style.fontFamily = 'sans-serif';
-  freighterShopBtn.textContent = 'Open Shop';
-  freighterShopBtn.addEventListener('click', () => {
-    try { openShop(); } catch (e) { console.warn('openShop failed', e); }
-  });
-  document.body.appendChild(freighterShopBtn);
-}
+// ...existing code...
 // explicit exit button for leaving interior mode completely
 let exitInteriorBtn = document.getElementById('exitInteriorBtn');
 if (!exitInteriorBtn) {
@@ -118,102 +104,36 @@ document.addEventListener('click', function _initAudioOnce() {
   try { audioSystem.init(); } catch (e) { console.warn('audio init failed', e); }
 }, { once: true, capture: true });
 
-// Flashlight / darkness state (granted when circuits go below 50%)
+// Flashlight / darkness state (managed by ShipRuntime)
 let sceneIsDark = false;
 let flashlight = null;
 let flashlightOn = false;
 let flashlightBattery = 100; // kept for compatibility but no longer drains
 const FLASHLIGHT_DRAIN_RATE = 0; // battery drain disabled
-// Flicker helpers
+// Flicker helpers placeholder (runtime manages timers)
 let _flickerTimers = [];
-function _clearFlickers() {
-  for (const t of _flickerTimers) clearTimeout(t);
-  _flickerTimers = [];
-}
-function _startFlicker(toDark = true, duration = 1400) {
-  _clearFlickers();
-  const start = performance.now();
-  // When flickering into darkness capture the current intensities as source;
-  // when flickering back on use the saved baseline intensities so lights fully return.
-  const origAmbient = toDark ? (ambientLight.intensity || BASE_AMBIENT_INTENSITY) : BASE_AMBIENT_INTENSITY;
-  const origDir = toDark ? (light.intensity || BASE_DIR_INTENSITY) : BASE_DIR_INTENSITY;
-  const lowAmbient = 0.06;
-  const lowDir = 0.08;
-  function step() {
-    const t = performance.now() - start;
-    if (t >= duration) {
-      // finish at target
-      ambientLight.intensity = toDark ? lowAmbient : BASE_AMBIENT_INTENSITY;
-      light.intensity = toDark ? lowDir : BASE_DIR_INTENSITY;
-      return;
-    }
-    // random flicker: choose either near off or near original depending on phase
-    const flick = Math.random() > 0.5 ? (toDark ? lowAmbient : origAmbient) : (toDark ? origAmbient * 0.3 : origAmbient * 0.6);
-    ambientLight.intensity = flick;
-    light.intensity = Math.max(0.02, flick * (toDark ? 1.2 : 1.6));
-    const next = 40 + Math.random() * 220;
-    _flickerTimers.push(setTimeout(step, next));
-  }
-  step();
-}
-
-// When circuits go low, darken the world and grant the player a flashlight
-window.addEventListener('circuits:low', (ev) => {
-  if (sceneIsDark) return;
-  sceneIsDark = true;
-  // Enter power-out state: disable ship movement and pilot UI until repaired
-  try { powerOut = true; } catch (e) {}
-  try { velocity.set(0,0,0); } catch (e) {}
-  try { interiorAutoThrust = false; } catch (e) {}
-  try { autopilotBtn.textContent = 'Autopilot: Off'; autopilotBtn.style.background = 'rgba(0,0,0,0.6)'; autopilotBtn.disabled = true; } catch (e) {}
-  try { pilotDisabled = true; if (pilotPopup) pilotPopup.style.display = 'none'; } catch (e) {}
-  try { pendingAutopilotOn = false; } catch (e) {}
-  // If we're currently in third-person flight, switch to the interior (first-person)
-  try {
-    if (flyEnabled && !interiorEnabled) {
-      // Reuse the same flow as pressing E while flying
-      enterBtn.click();
-    }
-  } catch (e) {}
-  try {
-    // flicker outage then settle to low lighting
-    _startFlicker(true, 1400);
-  } catch (e) {}
-  // Give player a flashlight (add to inventory) and auto-enable it
-  try {
-    addToInventory({ id: 'flashlight', name: 'Flashlight', price: 0, desc: 'Battery-powered flashlight' });
-    // create spotlight if missing
-    if (!flashlight) {
-      flashlight = new THREE.SpotLight(0xffffff, 0, 120, Math.PI/8, 0.3, 1);
-      flashlight.castShadow = false;
-      flashlight.target = new THREE.Object3D();
-      scene.add(flashlight.target);
-      scene.add(flashlight);
-    }
-    flashlightBattery = 100;
-    flashlightOn = true;
-    if (inventoryUI && inventoryUI.style.display === 'block') renderInventoryContents();
-    try { interactHint.textContent = 'Power failure — systems offline'; interactHint.style.display = 'block'; setTimeout(() => { try { interactHint.style.display = 'none'; } catch(e){} }, 1500); } catch (e) {}
-  } catch (err) { console.warn('Failed to grant flashlight', err); }
-  try { if (audioSystem) audioSystem.playOnce('poweroff'); } catch (e) {}
-});
-
-// When circuits are repaired above threshold, restore controls
-window.addEventListener('circuits:restored', (ev) => {
-  try { powerOut = false; } catch (e) {}
-  try { autopilotBtn.disabled = false; autopilotBtn.textContent = 'Autopilot: Off'; autopilotBtn.style.background = 'rgba(0,0,0,0.6)'; } catch (e) {}
-  try { pilotDisabled = false; } catch (e) {}
-  try { interactHint.textContent = 'Power restored'; interactHint.style.display = 'block'; setTimeout(() => { try { interactHint.style.display = 'none'; } catch(e){} }, 1200); } catch (e) {}
-  try { if (audioSystem) audioSystem.playOnce('powerup'); } catch (e) {}
-});
+let _originalEmissiveMap = new WeakMap();
 
 // Animation and interaction helpers (for cabL / cabR)
 let mixer = null;
 let cabL = null, cabR = null;
 let exitDoor = null;
 let pilot = null;
+let lockerDoor = null;
 const raycaster = new THREE.Raycaster();
 let interactTarget = null;
+// Helper used by inventory UI to determine if the player is near the locker
+try {
+  window.isPlayerNearLocker = function() {
+    try {
+      if (!lockerDoor || !activeCamera) return false;
+      const camPos = new THREE.Vector3(); activeCamera.getWorldPosition(camPos);
+      const doorPos = new THREE.Vector3(); lockerDoor.getWorldPosition(doorPos);
+      const dist = camPos.distanceTo(doorPos);
+      return dist <= INTERACT_DISTANCE + 0.2;
+    } catch (e) { return false; }
+  };
+} catch (e) {}
 const INTERACT_DISTANCE = 3.5;
 const PLAYER_RADIUS = 0.45; // collision radius for the FPS player inside
 // automatic door distances (in ship-local units)
@@ -275,7 +195,6 @@ if (!oxygenUI) {
 
 // Popup UI for pilot interaction (two options: Fly / Autopilot)
 let pilotPopup = document.getElementById('pilotPopup');
-let gpsButton = null;
 if (!pilotPopup) {
   pilotPopup = document.createElement('div');
   pilotPopup.id = 'pilotPopup';
@@ -283,49 +202,66 @@ if (!pilotPopup) {
   pilotPopup.style.left = '50%';
   pilotPopup.style.top = '40%';
   pilotPopup.style.transform = 'translate(-50%, -50%)';
-  pilotPopup.style.padding = '12px';
-  pilotPopup.style.background = 'rgba(0,0,0,0.85)';
+  pilotPopup.style.padding = '14px';
+  pilotPopup.style.background = 'rgba(6,8,12,0.92)';
   pilotPopup.style.color = '#fff';
-  pilotPopup.style.borderRadius = '8px';
+  pilotPopup.style.borderRadius = '10px';
   pilotPopup.style.fontFamily = 'sans-serif';
   pilotPopup.style.zIndex = 10002;
   pilotPopup.style.display = 'none';
-  const txt = document.createElement('div'); txt.textContent = 'Pilot options'; txt.style.marginBottom = '8px'; pilotPopup.appendChild(txt);
-  const btnFly = document.createElement('button'); btnFly.textContent = 'Fly (Third-person)'; btnFly.style.marginRight = '8px';
-  const btnStats = document.createElement('button'); btnStats.textContent = 'Ship Stats'; btnStats.style.marginRight = '8px';
-  const btnAuto = document.createElement('button'); btnAuto.textContent = 'Autopilot (Interior)';
-  const btnGPS = document.createElement('button'); btnGPS.textContent = 'Set GPS Target'; btnGPS.style.marginRight = '8px';
-  gpsButton = btnGPS;
-  const btnInv = document.createElement('button'); btnInv.textContent = 'Inventory'; btnInv.style.marginRight = '8px';
-  const btnClose = document.createElement('button'); btnClose.textContent = 'Cancel'; btnClose.style.marginLeft = '8px';
-  pilotPopup.appendChild(btnFly); pilotPopup.appendChild(btnStats); pilotPopup.appendChild(btnAuto); pilotPopup.appendChild(btnClose);
-  // insert Inventory and GPS buttons before the close button so they're visible
-  pilotPopup.insertBefore(btnInv, btnClose);
-  pilotPopup.insertBefore(btnGPS, btnClose);
+
+  const title = document.createElement('div');
+  title.textContent = 'Pilot';
+  title.style.fontSize = '16px';
+  title.style.fontWeight = '600';
+  title.style.marginBottom = '8px';
+  pilotPopup.appendChild(title);
+
+  const subtitle = document.createElement('div');
+  subtitle.textContent = 'Choose how you want to control the ship';
+  subtitle.style.fontSize = '12px';
+  subtitle.style.opacity = '0.85';
+  subtitle.style.marginBottom = '12px';
+  pilotPopup.appendChild(subtitle);
+
+  // small helper to apply consistent button styling
+  const styleBtn = (b) => {
+    b.style.padding = '8px 12px';
+    b.style.margin = '6px 8px 0 0';
+    b.style.background = 'rgba(255,255,255,0.06)';
+    b.style.color = '#fff';
+    b.style.border = '1px solid rgba(255,255,255,0.08)';
+    b.style.borderRadius = '6px';
+    b.style.cursor = 'pointer';
+    b.style.fontFamily = 'sans-serif';
+  };
+
+  const btnFly = document.createElement('button'); btnFly.textContent = 'Fly (3rd-person)'; styleBtn(btnFly);
+  const btnStats = document.createElement('button'); btnStats.textContent = 'Ship Stats'; styleBtn(btnStats);
+  const btnAuto = document.createElement('button'); btnAuto.textContent = 'Enable Autopilot (Interior)'; styleBtn(btnAuto);
+  const btnClose = document.createElement('button'); btnClose.textContent = 'Cancel'; styleBtn(btnClose);
+
+  const actions = document.createElement('div');
+  actions.appendChild(btnFly); actions.appendChild(btnStats); actions.appendChild(btnAuto); actions.appendChild(btnClose);
+  pilotPopup.appendChild(actions);
   document.body.appendChild(pilotPopup);
 
   btnClose.addEventListener('click', () => { pilotPopup.style.display = 'none'; });
-  btnInv.addEventListener('click', () => {
-    pilotPopup.style.display = 'none';
-    try { createInventoryUI(); openInventory(); } catch (err) { console.warn('Inventory failed', err); }
-  });
+
   btnFly.addEventListener('click', () => {
     pilotPopup.style.display = 'none';
-    // If we're inside, request a full detach first so we leave interior mode
     if (interiorEnabled) {
       interiorDetachRequested = true;
       interiorControls.unlock();
     }
-    // Request fly lock (will set flyEnabled via the lock handler)
     requestLock('fly');
   });
+
   btnStats.addEventListener('click', () => {
     pilotPopup.style.display = 'none';
-    // Open the centered modal and block walking while visible
     if (typeof window.__openShipStatsModal === 'function') {
       window.__openShipStatsModal();
     } else {
-      // fallback if modal isn't available yet: ensure overlay is rendered
       if (typeof statsOverlay === 'undefined' || !statsOverlay) renderStats();
       if (statsOverlay) {
         statsOverlay.style.display = statsOverlay.style.display === 'none' ? 'block' : 'none';
@@ -333,15 +269,14 @@ if (!pilotPopup) {
       }
     }
   });
+
   btnAuto.addEventListener('click', () => {
-    // If power is out, autopilot cannot be enabled
     if (powerOut) {
       try { interactHint.textContent = 'No power — cannot enable autopilot'; interactHint.style.display = 'block'; setTimeout(() => { try { interactHint.style.display = 'none'; } catch(e){} }, 1400); } catch (e) {}
       pilotPopup.style.display = 'none';
       return;
     }
     pilotPopup.style.display = 'none';
-    // If we're already inside, just enable autopilot
     if (interiorEnabled) {
       interiorAutoThrust = true;
       autopilotBtn.textContent = 'Autopilot: On';
@@ -349,25 +284,8 @@ if (!pilotPopup) {
       autopilotBtn.style.display = 'inline-block';
       return;
     }
-    // Otherwise, enter interior mode and enable autopilot once inside
     pendingAutopilotOn = true;
-    // Reuse the enter button flow so interior box is computed and lock requested
     enterBtn.click();
-  });
-  btnGPS.addEventListener('click', () => {
-    pilotPopup.style.display = 'none';
-    // Only allow one active freighter target at a time
-    if (freighterGoal) {
-      // keep popup closed; briefly notify player
-      try { alert('GPS target already active. Reach it before setting a new one.'); } catch (e) {}
-      return;
-    }
-    // spawn the freighter goal far from the player's current ship position and enable GPS HUD
-    try {
-      spawnFreighter();
-      enableGPS(true);
-      if (gpsButton) { gpsButton.disabled = true; gpsButton.textContent = 'GPS: Active'; }
-    } catch (err) { console.warn('GPS failed', err); }
   });
 }
 
@@ -500,46 +418,7 @@ let interiorBox = null;
 let desiredInteriorLocalPos = null; // temp store for desired local position when entering
 
 startBtn.addEventListener('click', ()=> { requestLock('fly'); });
-enterBtn.addEventListener('click', ()=> {
-  // will compute interior bounds and request pointer lock (see handler below)
-  if (!shipModel) return alert('Ship model not loaded yet');
-  const bin = shipModel.getObjectByName('binne');
-  if (!bin) return alert('No object named "binne" found inside ship.glb');
-  // compute the interior box now from the canonical base box (loaded earlier)
-  computeInteriorBoxFromBin();
-  // Prefer an explicit start marker inside the model if present.
-  // Look for both common spellings just in case (`inerior` or `interior`).
-  const startMarker = shipModel.getObjectByName('inerior') || shipModel.getObjectByName('interior');
-  if (startMarker) {
-    ship.updateMatrixWorld(true);
-    const worldPos = new THREE.Vector3();
-    startMarker.getWorldPosition(worldPos);
-    // convert world position into ship-local coordinates so it remains correct
-    // after we parent the FP object to `ship`.
-    desiredInteriorLocalPos = ship.worldToLocal(worldPos.clone());
-  } else {
-    // fallback: use the interior box center (existing behavior)
-    const newCenter = interiorBox.getCenter(new THREE.Vector3());
-    desiredInteriorLocalPos = newCenter.clone();
-  }
-
-  // create or update debug wireframe box
-  if (interiorDebugMesh) {
-    ship.remove(interiorDebugMesh);
-    interiorDebugMesh.geometry.dispose();
-  }
-  if (interiorConfig.debug) {
-    const boxSize = interiorBox.getSize(new THREE.Vector3());
-    const geo = new THREE.BoxGeometry(boxSize.x, boxSize.y, boxSize.z);
-    const edges = new THREE.EdgesGeometry(geo);
-    const mat = new THREE.LineBasicMaterial({ color: 0x00ff00 });
-    interiorDebugMesh = new THREE.LineSegments(edges, mat);
-    const boxCenter = interiorBox.getCenter(new THREE.Vector3());
-    interiorDebugMesh.position.copy(boxCenter);
-    ship.add(interiorDebugMesh);
-  }
-  requestLock('interior');
-});
+// Enter/Exit handlers moved to src/shipEntry.js (initialized later)
 
 // Autopilot button toggles continuous forward thrust while inside
 autopilotBtn.addEventListener('click', () => {
@@ -553,142 +432,48 @@ autopilotBtn.addEventListener('click', () => {
   autopilotBtn.style.background = interiorAutoThrust ? 'rgba(0,100,0,0.7)' : 'rgba(0,0,0,0.6)';
 });
 
-// --- GPS / Goal system ---
-let freighterGoal = null; // THREE.Object3D for the goal
-let gpsTracking = false;
-let gpsHud = null;
-const FREIGHTER_REACH_DISTANCE = 200; // distance (units) to consider the freighter 'reached'
-
-function createGpsHud() {
-  if (gpsHud) return;
-  gpsHud = document.createElement('div');
-  gpsHud.id = 'gpsHud';
-  gpsHud.style.position = 'fixed';
-  gpsHud.style.left = '12px';
-  gpsHud.style.top = '12px';
-  gpsHud.style.padding = '8px 12px';
-  gpsHud.style.background = 'rgba(0,0,0,0.6)';
-  gpsHud.style.color = '#fff';
-  gpsHud.style.borderRadius = '6px';
-  gpsHud.style.fontFamily = 'sans-serif';
-  gpsHud.style.zIndex = 10005;
-  gpsHud.style.display = 'none';
-  gpsHud.textContent = 'GPS: --';
-  document.body.appendChild(gpsHud);
-}
-
-function enableGPS(on) {
-  createGpsHud();
-  gpsTracking = !!on;
-  gpsHud.style.display = gpsTracking ? 'inline-block' : 'none';
-}
-
-function spawnFreighter() {
-  // Only spawn a new one if none exists
-  if (freighterGoal) return console.warn('Freighter target already exists');
-  // lazy-load freighter; place far from current ship position
-  const fLoader = new GLTFLoader();
-  fLoader.load('freighter.glb', gltf => {
-    freighterGoal = gltf.scene;
-    // choose a distant random direction biased on horizontal plane
-    const dir = new THREE.Vector3((Math.random()-0.5), (Math.random()-0.05)*0.1, (Math.random()-0.5)).normalize();
-    // place the freighter very far away so it takes real time to reach
-    // spawn distance: 40,000 - 80,000 units away
-    const dist = 40000 + Math.random() * 40000;
-    const targetPos = new THREE.Vector3().copy(ship.position).add(dir.multiplyScalar(dist));
-    freighterGoal.position.copy(targetPos);
-    freighterGoal.name = 'freighter_goal';
-    scene.add(freighterGoal);
-  }, undefined, err => {
-    console.warn('Failed to load freighter.glb', err);
-    // re-enable GPS button if load failed so player can retry
-    if (gpsButton) { gpsButton.disabled = false; gpsButton.textContent = 'Set GPS Target'; }
-    enableGPS(false);
-  });
-}
+// ...existing code...
 
 // --- Simple Shop System (dummy) ---
 let shopUI = null;
 const shopItems = [
   { id: 'medkit', name: 'Medkit', price: 150, desc: 'Restores health (dummy)'} ,
   { id: 'fuelcell', name: 'Fuel Cell', price: 320, desc: 'Refuels ship (dummy)'},
-  { id: 'chip', name: 'Navigation Chip', price: 480, desc: 'Improves GPS (dummy)'}
+  // ...existing code...
 ];
 
-// Simple inventory store: id -> { item, count }
-const inventory = {};
-let inventoryUI = null;
+// Inventory is provided by the modular inventory system in src/inventory.js
+const inventory = Inventory.inventory;
 
-function addToInventory(item) {
-  if (!inventory[item.id]) inventory[item.id] = { item: item, count: 0 };
-  inventory[item.id].count += 1;
-}
+// Initialize player inventory UI and seed it for testing
+  try {
+    // create UIs (hidden) and seed a flashlight in the locker for testing
+    try { if (window.playerInventory && typeof window.playerInventory.createPlayerUI === 'function') window.playerInventory.createPlayerUI(); } catch (e) {}
+    try { if (window.playerInventory && typeof window.playerInventory.createLockerUI === 'function') window.playerInventory.createLockerUI(); } catch (e) {}
+    const testFlash = { id: 'flashlight', name: 'Flashlight', price: 0, desc: 'Battery-powered flashlight' };
+    try { if (window.playerInventory && typeof window.playerInventory.setLockerInventory === 'function') window.playerInventory.setLockerInventory({ flashlight: { item: testFlash, count: 1 } }); } catch (e) {}
+  } catch (e) {}
 
-function createInventoryUI() {
-  if (inventoryUI) return inventoryUI;
-  inventoryUI = document.createElement('div');
-  inventoryUI.id = 'inventory-ui';
-  inventoryUI.style.position = 'fixed';
-  inventoryUI.style.left = '50%';
-  inventoryUI.style.top = '50%';
-  inventoryUI.style.transform = 'translate(-50%, -50%)';
-  inventoryUI.style.zIndex = 10011;
-  inventoryUI.style.background = 'rgba(6,6,10,0.96)';
-  inventoryUI.style.color = '#fff';
-  inventoryUI.style.padding = '16px';
-  inventoryUI.style.borderRadius = '10px';
-  inventoryUI.style.minWidth = '320px';
-  inventoryUI.style.fontFamily = 'sans-serif';
+// Initialize shipRuntime now that inventory helpers (addToInventory, UI) exist
+ShipRuntime.init({
+  scene,
+  ambientLight,
+  dirLight: light,
+  shipSystems,
+  audioSystem,
+  addToInventory: Inventory.addToInventory,
+  inventoryUI: Inventory.inventoryUI,
+  interactHint,
+  autopilotBtn,
+});
 
-  const title = document.createElement('div'); title.textContent = 'Inventory'; title.style.fontSize = '18px'; title.style.marginBottom = '10px'; inventoryUI.appendChild(title);
-
-  const contents = document.createElement('div'); contents.id = 'inventory-contents'; contents.style.maxHeight = '50vh'; contents.style.overflow = 'auto'; inventoryUI.appendChild(contents);
-
-  const close = document.createElement('div'); close.style.marginTop = '12px'; close.style.textAlign = 'right';
-  const closeBtn = document.createElement('button'); closeBtn.textContent = 'Close'; closeBtn.style.padding = '6px 10px'; closeBtn.style.borderRadius = '6px';
-  closeBtn.addEventListener('click', () => { if (inventoryUI) inventoryUI.style.display = 'none'; });
-  close.appendChild(closeBtn);
-  inventoryUI.appendChild(close);
-  inventoryUI.style.display = 'none';
-  document.body.appendChild(inventoryUI);
-  renderInventoryContents();
-  return inventoryUI;
-}
-
-function openInventory() {
-  createInventoryUI();
-  if (inventoryUI) {
-    renderInventoryContents();
-    inventoryUI.style.display = 'block';
-  }
-}
-
-function renderInventoryContents() {
-  if (!inventoryUI) return;
-  const contents = document.getElementById('inventory-contents');
-  if (!contents) return;
-  contents.innerHTML = '';
-  const keys = Object.keys(inventory);
-  if (keys.length === 0) {
-    const empt = document.createElement('div'); empt.textContent = 'Inventory is empty.'; empt.style.opacity = '0.9'; contents.appendChild(empt); return;
-  }
-  for (const k of keys) {
-    const entry = inventory[k];
-    const row = document.createElement('div'); row.style.display = 'flex'; row.style.justifyContent = 'space-between'; row.style.alignItems = 'center'; row.style.padding = '6px 0';
-    const left = document.createElement('div'); const nm = document.createElement('div'); nm.textContent = entry.item.name; nm.style.fontWeight = '600'; const cnt = document.createElement('div'); cnt.textContent = entry.item.desc; cnt.style.fontSize = '12px'; cnt.style.opacity = '0.9'; left.appendChild(nm); left.appendChild(cnt);
-    const right = document.createElement('div'); right.style.textAlign = 'right'; const count = document.createElement('div'); count.textContent = `${entry.count}x`; count.style.marginBottom = '6px';
-    // Remove ability to use items from the inventory UI
-    // Only show the count; items are not usable from this UI.
-    right.appendChild(count);
-    row.appendChild(left); row.appendChild(right);
-    contents.appendChild(row);
-  }
-}
+// Initialize flashlight system
+try { Flashlight.init({ scene }); } catch (e) {}
 
 function createShopUI() {
   if (shopUI) return shopUI;
   shopUI = document.createElement('div');
-  shopUI.id = 'freighter-shop';
+  shopUI.id = 'shop-ui';
   shopUI.style.position = 'fixed';
   shopUI.style.left = '50%';
   shopUI.style.top = '50%';
@@ -702,7 +487,7 @@ function createShopUI() {
   shopUI.style.fontFamily = 'sans-serif';
 
   const title = document.createElement('div');
-  title.textContent = 'Freighter Shop';
+  title.textContent = 'Shop';
   title.style.fontSize = '18px';
   title.style.marginBottom = '10px';
   shopUI.appendChild(title);
@@ -729,13 +514,15 @@ function createShopUI() {
     btn.style.cursor = 'pointer';
     btn.addEventListener('click', () => {
       // Dummy purchase: add to inventory, disable button and show purchased state
-      addToInventory(it);
+      Inventory.addToInventory(it);
+      try { if (window.playerInventory && typeof window.playerInventory.addToPlayer === 'function') window.playerInventory.addToPlayer(it); } catch (e) {}
       btn.disabled = true;
       btn.textContent = 'Purchased';
       btn.style.opacity = '0.7';
       console.log('Purchased item:', it.id);
       // update inventory UI if currently open
-      if (inventoryUI && inventoryUI.style.display === 'block') renderInventoryContents();
+      try { if (window.playerInventory && document.getElementById('player-inventory-ui') && document.getElementById('player-inventory-ui').style.display === 'block') window.playerInventory.render(); } catch (e) {}
+      if (Inventory.inventoryUI && Inventory.inventoryUI.style.display === 'block') Inventory.renderInventoryContents();
     });
     btnWrap.appendChild(btn);
 
@@ -753,8 +540,6 @@ function createShopUI() {
   closeBtn.style.borderRadius = '6px';
   closeBtn.addEventListener('click', () => {
     if (shopUI) shopUI.style.display = 'none';
-    // re-enable GPS button so player can set new targets
-    if (gpsButton) { gpsButton.disabled = false; gpsButton.textContent = 'Set GPS Target'; }
     // After closing the shop, ensure the next user click can re-lock the pointer.
     try { if (canvas && typeof canvas.focus === 'function') canvas.focus(); } catch (e) {}
     const tryRelock = (ev) => {
@@ -762,7 +547,7 @@ function createShopUI() {
       // ignore clicks that hit UI elements (shop, pilot popup, inventory)
       try {
         const tgt = ev.target;
-        if (tgt && tgt.closest && (tgt.closest('#freighter-shop') || tgt.closest('#pilotPopup') || tgt.closest('#inventory-ui') || tgt.closest('#ship-stats') )) {
+        if (tgt && tgt.closest && (tgt.closest('#shop-ui') || tgt.closest('#pilotPopup') || tgt.closest('#inventory-ui') || tgt.closest('#ship-stats') )) {
           return;
         }
       } catch (e) {}
@@ -838,6 +623,20 @@ interiorControls.addEventListener('lock', ()=> {
     // but clear player input so they can't thrust the ship while inside
     move.forward = move.right = move.up = 0;
     flyEnabled = false;
+   // --- Reset all FPS and float key states to prevent stuck/jumbled controls ---
+   try {
+     const obj = interiorControls.getObject();
+     if (obj && obj.userData) {
+       if (obj.userData.fps && obj.userData.fps.keyStates) {
+         for (const k in obj.userData.fps.keyStates) obj.userData.fps.keyStates[k] = false;
+         if (obj.userData.fps.velocity) obj.userData.fps.velocity.set(0,0,0);
+       }
+       if (obj.userData.float && obj.userData.float.keyStates) {
+         for (const k in obj.userData.float.keyStates) obj.userData.float.keyStates[k] = false;
+         if (obj.userData.float.velocity) obj.userData.float.velocity.set(0,0,0);
+       }
+     }
+   } catch (e) {}
     // show interior UI while inside
     autopilotBtn.style.display = 'inline-block';
     exitInteriorBtn.style.display = 'inline-block';
@@ -848,6 +647,14 @@ interiorControls.addEventListener('lock', ()=> {
       autopilotBtn.style.background = 'rgba(0,100,0,0.7)';
       pendingAutopilotOn = false;
     }
+    // Disable buite collision and wireframe when inside
+    try {
+      const buite = shipModel && shipModel.getObjectByName && shipModel.getObjectByName('buite');
+      if (buite) {
+        buite.userData.collidable = false;
+        buite.visible = false;
+      }
+    } catch (e) {}
   }
 });
 interiorControls.addEventListener('unlock', ()=> {
@@ -868,6 +675,15 @@ interiorControls.addEventListener('unlock', ()=> {
       interiorAutoThrust = false;
       autopilotBtn.textContent = 'Autopilot: Off';
       autopilotBtn.style.background = 'rgba(0,0,0,0.6)';
+      // Re-enable buite collision and wireframe when outside
+      try {
+        const buite = shipModel && shipModel.getObjectByName && shipModel.getObjectByName('buite');
+        if (buite) {
+          buite.userData.collidable = true;
+          // Use config to determine wireframe visibility
+          buite.visible = interiorConfig && (typeof interiorConfig.showBuiteWire !== 'undefined' ? !!interiorConfig.showBuiteWire : true);
+        }
+      } catch (e) {}
     } else {
       // Otherwise (likely ESC), just release the pointer lock and show the cursor
       // but keep interior mode active so you can still walk and the ship keeps moving.
@@ -881,25 +697,13 @@ interiorControls.addEventListener('unlock', ()=> {
   }
 });
 
-// Exit Interior button requests a full detach and triggers unlock
-exitInteriorBtn.addEventListener('click', () => {
-  if (!interiorEnabled) return;
-  interiorDetachRequested = true;
-  // trigger pointer lock exit — the unlock handler will perform the detach
-  interiorControls.unlock();
-});
+// Exit Interior handler moved to src/shipEntry.js
 
 // Ship model (use your ship.glb at the project root)
 const loader = new GLTFLoader();
 let shipModel = null;
 
-function applyBuiteVisibility() {
-  try {
-    const buite = shipModel && shipModel.getObjectByName && shipModel.getObjectByName('buite');
-    const visible = interiorConfig && (typeof interiorConfig.showBuiteWire !== 'undefined' ? !!interiorConfig.showBuiteWire : true);
-    if (buite) buite.visible = visible;
-  } catch (e) { /* ignore */ }
-}
+// applyBuiteVisibility moved to ShipEntry.applyBuiteVisibility
 
 // Ship root object (world) and camera pivot for third-person follow
 const ship = new THREE.Object3D();
@@ -917,20 +721,7 @@ let interiorDebugMesh = null;
 let interiorBin = null; // live reference to the 'binne' object
 let baseInteriorBox = null; // canonical box for 'binne' in ship-local space
 
-function computeInteriorBoxFromBin() {
-  // Build `interiorBox` from the fixed `baseInteriorBox` (computed at load)
-  if (!baseInteriorBox) return;
-  interiorBox = baseInteriorBox.clone();
-  // apply optional interior config adjustments (scale + offset)
-  const center = interiorBox.getCenter(new THREE.Vector3());
-  const size = interiorBox.getSize(new THREE.Vector3());
-  const scaleV = new THREE.Vector3(interiorConfig.scale[0] || 1, interiorConfig.scale[1] || 1, interiorConfig.scale[2] || 1);
-  size.multiply(scaleV);
-  const posOffset = new THREE.Vector3(interiorConfig.position[0] || 0, interiorConfig.position[1] || 0, interiorConfig.position[2] || 0);
-  const half = size.clone().multiplyScalar(0.5);
-  interiorBox.min.copy(center).sub(half).add(posOffset);
-  interiorBox.max.copy(center).add(half).add(posOffset);
-}
+// computeInteriorBoxFromBin moved to ShipEntry.computeInteriorBoxFromBin
 
 // Safe pointer-lock requester: checks availability and catches SecurityErrors
 let _pointerLockHint = null;
@@ -958,6 +749,17 @@ function _ensurePointerLockHint() {
 
 function requestLock(kind) {
   const ctrl = kind === 'interior' ? interiorControls : controls;
+  // Prevent entering flight mode if engine manifolds are critically low
+  if (kind === 'fly') {
+    try {
+      const systems = shipSystems.getAll();
+      const engVal = systems && systems.engine ? systems.engine.value : 100;
+      if (engVal < 25) {
+        try { interactHint.textContent = 'Engine critical — cannot engage flight'; interactHint.style.display = 'block'; setTimeout(() => { try { interactHint.style.display = 'none'; } catch(e){} }, 1600); } catch (e) {}
+        return;
+      }
+    } catch (e) { /* ignore */ }
+  }
   // Quick feature-detect for Pointer Lock API
   const supported = (typeof document.pointerLockElement !== 'undefined') || (typeof document.mozPointerLockElement !== 'undefined') || (typeof document.webkitPointerLockElement !== 'undefined');
   if (!supported) {
@@ -1018,7 +820,7 @@ fetch('ship.config.json')
 // load interior config (position/scale/debug)
 fetch('interior.config.json')
   .then(r => r.json())
-  .then(cfg => { interiorConfig = { ...interiorConfig, ...cfg }; try { applyBuiteVisibility(); } catch(e){} })
+  .then(cfg => { interiorConfig = { ...interiorConfig, ...cfg }; try { if (window.ShipEntry && ShipEntry.applyBuiteVisibility) ShipEntry.applyBuiteVisibility(shipModel, interiorConfig); } catch(e){} })
   .catch(() => console.warn('No interior.config.json found — using defaults'));
 
 loader.load('ship.glb', gltf => {
@@ -1032,44 +834,26 @@ loader.load('ship.glb', gltf => {
   try {
     loader.load('powerbox.glb', pgl => {
       try {
-        powerbox = pgl.scene;
-        powerbox.name = 'powerbox';
-        // Attach to the ship model so it moves/rotates with the ship (fixed relative to ship)
-        shipModel.add(powerbox);
-        // mark as fixed for downstream logic
-        powerbox.userData.fixed = true;
-        // if the powerbox GLB contains animations, create a mixer for it
-        if (pgl.animations && pgl.animations.length > 0) {
-          try {
-            powerboxMixer = new THREE.AnimationMixer(powerbox);
-            powerboxClips = pgl.animations.slice();
-            try {
-              powerboxMixer.addEventListener('finished', (ev) => {
-                const clip = ev.action && ev.action.getClip ? ev.action.getClip() : null;
-                if (!clip) return;
-                if (powerboxClips && powerboxClips.some(c => c === clip) && powerboxInteracting) {
-                  // Clear any existing finish timer and set a new one so the repair
-                  // happens 3 seconds after the last finished animation frame.
-                  try { if (powerboxFinishTimer) { clearTimeout(powerboxFinishTimer); powerboxFinishTimer = null; } } catch (e) {}
-                  powerboxFinishTimer = setTimeout(() => {
-                    try { shipSystems.repair('circuits', 100); } catch (e) { console.warn('Repair failed', e); }
-                    powerboxInteracting = false;
-                    powerboxActions = [];
-                    try { _startFlicker(false, 1400); _flickerTimers.push(setTimeout(() => { sceneIsDark = false; }, 1400)); } catch (e) {}
-                    try { interactHint.textContent = 'Power restored'; setTimeout(() => { try { interactHint.style.display = 'none'; } catch(e){} }, 1200); } catch (e) {}
-                    try { if (audioSystem) audioSystem.playOnce('powerup'); } catch (e) {}
-                    powerboxFinishTimer = null;
-                  }, 3000);
-                }
-              });
-            } catch (e) { /* ignore event binding errors */ }
-          } catch (e) { console.warn('Failed to create powerbox mixer', e); }
-        }
-        // Optionally position/scale the box here if needed (defaults to model origin)
-        // powerbox.position.set(0.5, 0.2, -1.0);
-      } catch (err) { console.warn('Failed to attach powerbox', err); }
+        // Delegate powerbox handling to shipRuntime so logic lives in the module
+        ShipRuntime.handlePowerboxLoad(pgl, shipModel);
+      } catch (err) { console.warn('Failed to attach powerbox (runtime)', err); }
     }, undefined, err => { console.warn('Failed to load powerbox.glb', err); });
   } catch (e) { console.warn('Powerbox load error', e); }
+
+  // Load anchors.glb and attach it to the ship
+  try {
+    loader.load('anchors.glb', agl => {
+      try {
+        const anchors = agl.scene;
+        anchors.name = 'anchors';
+        // Optionally set position/scale/rotation here if needed
+        // anchors.position.set(0, -2, 0); // Example: place below the ship
+        // anchors.scale.set(1, 1, 1); // Example: default scale
+        shipModel.add(anchors);
+        anchors.userData.fixed = true;
+      } catch (err) { console.warn('Failed to attach anchors', err); }
+    }, undefined, err => { console.warn('Failed to load anchors.glb', err); });
+  } catch (e) { console.warn('Anchors load error', e); }
   // Also try to load an optional EXIT model and attach it to the ship
   try {
     loader.load('EXIT.glb', exgl => {
@@ -1120,162 +904,139 @@ loader.load('ship.glb', gltf => {
       } catch (err) { console.warn('Failed to attach EXIT', err); }
     }, undefined, err => { console.warn('Failed to load EXIT.glb', err); });
   } catch (e) { console.warn('EXIT load error', e); }
-  // Load optional 'buite' model but render it as wireframe only
+  // Delegate buite/binne loading and collision setup to ShipEntry (wait for helper to load)
   try {
-    loader.load('buite.glb', bgl => {
+    const tryAttach = () => {
       try {
-        const buite = bgl.scene;
-        buite.name = 'buite';
-        // Replace each mesh material with a simple wireframe material
-        buite.traverse(child => {
-          if (child.isMesh) {
-            try {
-              const baseColor = (child.material && child.material.color && child.material.color.getHex) ? child.material.color.getHex() : 0xffffff;
-              child.material = new THREE.MeshBasicMaterial({ color: baseColor, wireframe: true });
-            } catch (e) {
-              child.material = new THREE.MeshBasicMaterial({ color: 0xffffff, wireframe: true });
-            }
-            child.material.needsUpdate = true;
-          }
-        });
-        // Attach as a child so it moves with the ship
-        shipModel.add(buite);
-        buite.userData.wireframe = true;
-        // Compute ship-local collision boxes for each mesh in the buite model
-        try {
-          const invShip = new THREE.Matrix4().copy(ship.matrixWorld).invert();
-          const boxes = [];
-          buite.updateMatrixWorld(true);
-          buite.traverse(child => {
-            if (child.isMesh && child.geometry) {
-              const geom = child.geometry;
-              if (!geom.boundingBox) geom.computeBoundingBox();
-              const gbox = geom.boundingBox.clone();
-              child.updateMatrixWorld(true);
-              gbox.applyMatrix4(child.matrixWorld);
-              // transform to ship-local
-              const localBox = gbox.clone().applyMatrix4(invShip);
-              boxes.push(localBox);
-            }
-          });
-          if (boxes.length === 0) {
-            const pos = new THREE.Vector3(); buite.getWorldPosition(pos);
-            const b = new THREE.Box3().setFromCenterAndSize(pos, new THREE.Vector3(1,1,1));
-            boxes.push(b.applyMatrix4(invShip));
-          }
-          buite.userData.collisionBoxes = boxes;
-          buite.userData.collidable = true;
-          try { applyBuiteVisibility(); } catch (e) {}
-        } catch (e) { console.warn('Failed to compute buite collision boxes', e); }
-      } catch (err) { console.warn('Failed to attach buite', err); }
-    }, undefined, err => { console.warn('Failed to load buite.glb', err); });
-  } catch (e) { console.warn('buite load error', e); }
-    // expose pilot object if present
-  pilot = shipModel.getObjectByName('pilot');
-  // also try to find an `EXIT` child if it was embedded inside ship.glb
-  if (!exitDoor) exitDoor = shipModel.getObjectByName('EXIT');
-  // Compute a fixed collision box for the `binne` node in ship-local space.
-  // This uses the raw geometry bounds (plus mesh local transforms) and a
-  // one-time transform into the ship-local frame so subsequent flight
-  // rotations/animations won't change the canonical collision box.
-  const bin = shipModel.getObjectByName('binne');
-  if (bin) {
-    // compute bounding box in `bin` local space by unioning child geometries
-    const binLocalBox = new THREE.Box3();
-    bin.traverse(child => {
-      if (child.isMesh && child.geometry) {
-        const geom = child.geometry;
-        if (!geom.boundingBox) geom.computeBoundingBox();
-        const gbox = geom.boundingBox.clone();
-        // apply mesh's local matrix (relative to `bin`) to place geometry inside bin-local
-        gbox.applyMatrix4(child.matrix);
-        binLocalBox.union(gbox);
-      }
-    });
-    // transform that box into ship-local space using the bin->ship matrix
-    ship.updateMatrixWorld(true);
-    bin.updateMatrixWorld(true);
-    const invShip = new THREE.Matrix4().copy(ship.matrixWorld).invert();
-    const binToShip = new THREE.Matrix4().multiplyMatrices(invShip, bin.matrixWorld);
-    baseInteriorBox = binLocalBox.clone().applyMatrix4(binToShip);
-  }
-  // Hide the visual geometry of the interior 'binne' while keeping its meshes
-  // in the scene so they still contribute to bounding-box / collision calculations.
-  if (bin) {
-    bin.traverse(child => {
-      if (child.isMesh) {
-        // clone material(s) so we don't accidentally mutate shared materials
-        if (Array.isArray(child.material)) {
-          child.material = child.material.map(mat => {
-            const m = mat.clone();
-            m.transparent = true;
-            m.opacity = 0;
-            m.depthWrite = false;
-            return m;
-          });
-        } else if (child.material) {
-          const m = child.material.clone();
-          m.transparent = true;
-          m.opacity = 0;
-          m.depthWrite = false;
-          child.material = m;
+        if (window.ShipEntry && typeof window.ShipEntry.attachShipModel === 'function') {
+          window.ShipEntry.attachShipModel({ shipModel, ship, loader, setBaseInteriorBox: b => { baseInteriorBox = b; }, setPilot: p => { pilot = p; }, setExitDoor: d => { exitDoor = d; } });
+          return true;
         }
-        if (child.material) child.material.needsUpdate = true;
-      }
-    });
-  }
-  // Setup animations / interaction targets for cabL / cabR
-  if (gltf.animations && gltf.animations.length > 0) {
-    mixer = new THREE.AnimationMixer(shipModel);
-    ensureMixerHandler();
-    const clips = gltf.animations;
-    cabL = shipModel.getObjectByName('cabL');
-    cabR = shipModel.getObjectByName('cabR');
-    [cabL, cabR].forEach(obj => {
-      if (!obj) return;
-      obj.userData.interactionClips = [];
-      for (const clip of clips) {
-        const usesObj = clip.tracks && clip.tracks.some(t => t.name.indexOf(obj.name) !== -1);
-        const nameMatch = clip.name && clip.name.toLowerCase().indexOf(obj.name.toLowerCase()) !== -1;
-        if (usesObj || nameMatch) obj.userData.interactionClips.push(clip);
-      }
-    });
-    // compute simple ship-local bounding boxes for cabL / cabR to allow collision checks
-    [cabL, cabR].forEach(obj => {
-      if (!obj) return;
-      const worldBox = new THREE.Box3();
-      // ensure matrices are up to date
-      ship.updateMatrixWorld(true);
-      obj.updateMatrixWorld(true);
-      obj.traverse(child => {
-        if (child.isMesh && child.geometry) {
-          const geom = child.geometry;
-          if (!geom.boundingBox) geom.computeBoundingBox();
-          const gbox = geom.boundingBox.clone();
-          // apply mesh world transform so box is in world space
-          child.updateMatrixWorld(true);
-          gbox.applyMatrix4(child.matrixWorld);
-          worldBox.union(gbox);
+      } catch (e) { /* ignore */ }
+      return false;
+    };
+    if (!tryAttach()) {
+      // Poll briefly until the helper is available
+      const attachRetry = setInterval(() => {
+        if (tryAttach()) clearInterval(attachRetry);
+      }, 120);
+    }
+  } catch (e) { console.warn('ShipEntry.attachShipModel scheduling failed', e); }
+  // Initialize pilot/door animations via Doors module (cabL/cabR and EXIT)
+  try {
+    const tryInitDoors = () => {
+      try {
+        if (window.Doors && typeof window.Doors.init === 'function') {
+          window.Doors.init({ ship, shipModel, animations: gltf.animations || [], setMixer: m => { mixer = m; try { setupLocker({ gltf, shipModel, mixer: m, setLockerDoor: d => { lockerDoor = d; } }); } catch (e) {} }, ensureMixerHandler, setCabs: (l, r) => { cabL = l; cabR = r; }, setExitDoor: d => { exitDoor = d; } });
+          return true;
         }
-      });
-      // if traversal found nothing, make a tiny box around the object's world position
-      if (worldBox.isEmpty()) {
-        const pos = new THREE.Vector3(); obj.getWorldPosition(pos);
-        worldBox.min.copy(pos).subScalar(0.5);
-        worldBox.max.copy(pos).addScalar(0.5);
-      }
-      // transform that world box into ship-local space
-      const invShip = new THREE.Matrix4().copy(ship.matrixWorld).invert();
-      obj.userData.localBox = worldBox.clone().applyMatrix4(invShip);
-      // initialize collision/state flags
-      obj.userData.collidable = true;
-      obj.userData.frozenOnLast = false; // true when frozen on last frame after forward play
-      obj.userData.playing = false; // true when currently playing any interaction
-    });
-  }
+      } catch (e) {}
+      return false;
+    };
+    if (!tryInitDoors()) {
+      const retry = setInterval(() => { if (tryInitDoors()) clearInterval(retry); }, 120);
+    }
+  } catch (e) { console.warn('Doors.init scheduling failed', e); }
+  // Delegate locker animation handling to animatedComponents.setupLocker
+  try { setupLocker({ gltf, shipModel, mixer: mixer, setLockerDoor: d => { lockerDoor = d; } }); } catch (e) {}
 }, undefined, err => console.warn('Failed to load ship.glb — put it at the project root', err));
 
+// Play locker open animation (forward to last keyframe) and resolve when finished.
+// Expose locker playback helpers via animatedComponents for compatibility
+try { window.playLockerOpen = playLockerOpen; window.playLockerClose = playLockerClose; } catch (e) {}
+
 // Near starfield only: many small stars wrapped around the camera to appear infinite
+
+// Dynamically load the ship entry/exit helper module and initialize it.
+(function(){
+  try {
+    const s = document.createElement('script');
+    s.src = 'src/shipEntry.js';
+    s.onload = () => {
+      if (!window.ShipEntry) return;
+      try {
+        ShipEntry.init({
+          ship: ship,
+          getShipModel: () => shipModel,
+          getBaseInteriorBox: () => baseInteriorBox,
+          setInteriorBox: (b) => { interiorBox = b; },
+          setDesiredInteriorLocalPos: (v) => { desiredInteriorLocalPos = v; },
+          requestLock: requestLock,
+          getInteriorControls: () => interiorControls,
+          getInteriorEnabled: () => interiorEnabled,
+          setInteriorDetachRequested: (v) => { interiorDetachRequested = v; },
+          interiorConfig: interiorConfig
+        });
+      } catch (e) {
+        console.warn('Failed to initialize ShipEntry', e);
+      }
+    };
+    document.body.appendChild(s);
+  } catch (e) { console.warn('Failed to load shipEntry helper', e); }
+})();
+// Load shipControls non-module helper (input + autopilot wiring)
+(function(){
+  try {
+    const s2 = document.createElement('script');
+    s2.src = 'src/shipControls.js';
+    document.body.appendChild(s2);
+  } catch (e) { console.warn('Failed to load shipControls helper', e); }
+})();
+
+// Load doors helper (pilot/cabin/EXIT animations)
+(function(){
+  try {
+    const s3 = document.createElement('script');
+    s3.src = 'src/doors.js';
+    document.body.appendChild(s3);
+  } catch (e) { console.warn('Failed to load doors helper', e); }
+})();
+
+// Initialize ShipControls when available and provide references it needs
+(function initShipControls(){
+  try {
+    if (!window.ShipControls) return setTimeout(initShipControls, 120);
+    ShipControls.init({
+      ship,
+      shipModel: () => shipModel,
+      getShipSystems: () => shipSystems,
+      move,
+      velocity,
+      target: shipTarget,
+      yaw: 0,
+      pitch: 0,
+      ACCEL: ACCEL,
+      MAX_SPEED: MAX_SPEED,
+      DRAG: DRAG,
+      ROTATION_DAMPING: ROTATION_DAMPING,
+      ROTATION_SPEED: ROTATION_SPEED,
+      BANK_AMOUNT: BANK_AMOUNT,
+      getShipModel: () => shipModel,
+      getShipSystems: () => shipSystems,
+      controls,
+      interiorControls,
+      camera,
+      fpCamera,
+      cameraPivot,
+      nearStars,
+      nearGeo,
+      randPointInSphere,
+      BASE_FOV: BASE_FOV,
+      NEAR_STAR_RADIUS: NEAR_STAR_RADIUS,
+      MIN_NEAR_STAR_DISTANCE: MIN_NEAR_STAR_DISTANCE,
+      _replaceRadiusSq: _replaceRadiusSq,
+      frameState: { frameCounter: 0 },
+      getInteriorEnabled: () => interiorEnabled,
+      getInteriorAutoThrust: () => interiorAutoThrust,
+      setInteriorAutoThrust: (v) => { interiorAutoThrust = v; },
+      getFlyEnabled: () => flyEnabled,
+      setFlyEnabled: (v) => { flyEnabled = v; },
+      getPowerOut: () => powerOut,
+      interactHint,
+      shipSystemsGet: () => shipSystems,
+    });
+  } catch (e) { console.warn('initShipControls error', e); }
+})();
 const NEAR_STAR_COUNT = 1200;
 const NEAR_STAR_RADIUS = 600;
 const MIN_NEAR_STAR_DISTANCE = 30; // avoid stars that are too close and look huge
@@ -1317,6 +1078,10 @@ document.addEventListener('keydown', e => {
     if (e.code === 'Escape') { if (window.__closeShipStatsModal) window.__closeShipStatsModal(); }
     return;
   }
+  // Toggle player inventory with I
+  if (e.code === 'KeyI') {
+    try { if (window.playerInventory && typeof window.playerInventory.togglePlayerUI === 'function') { window.playerInventory.togglePlayerUI(); return; } } catch (e) {}
+  }
   if (!(flyEnabled || interiorEnabled)) return;
   // Handle quick E actions: enter interior when flying, or interact when inside
   if (e.code === 'KeyE') {
@@ -1334,44 +1099,23 @@ document.addEventListener('keydown', e => {
       return;
     }
     if (interiorEnabled) {
-      // If we're looking at the powerbox, trigger its repair animation(s)
+      // If we're looking at the powerbox, delegate repair handling to ShipRuntime
       if (interactTarget && interactTarget.name === 'powerbox') {
-        const systems = shipSystems.getAll();
-        const circVal = systems && systems.circuits ? systems.circuits.value : 100;
-        if (circVal >= 50) {
-          try { interactHint.textContent = 'Power stable — no repair needed'; interactHint.style.display = 'block'; } catch (e) {}
-          return;
-        }
-        // If the powerbox GLB has no animations, perform an immediate repair.
-        if (!powerbox || !powerboxMixer || !powerboxClips || powerboxClips.length === 0) {
-          try {
-            shipSystems.repair('circuits', 100);
-            _startFlicker(false, 1400);
-            _flickerTimers.push(setTimeout(() => { sceneIsDark = false; }, 1400));
-            interactHint.textContent = 'Power restored';
-            setTimeout(() => { try { interactHint.style.display = 'none'; } catch (e) {} }, 1200);
-            try { if (audioSystem) audioSystem.playOnce('powerup'); } catch (e) {}
-          } catch (e) { console.warn('Instant power restore failed', e); }
-          return;
-        }
-        // Start the powerbox animations at their natural speed and wait for them to finish.
-        if (!powerboxInteracting) {
-          powerboxActions = [];
-          for (const clip of powerboxClips) {
-            try {
-              const action = powerboxMixer.clipAction(clip);
-              action.reset();
-              action.setLoop(THREE.LoopOnce, 0);
-              action.clampWhenFinished = true;
-              action.timeScale = 1; // play at natural clip speed
-              action.play();
-              powerboxActions.push(action);
-            } catch (err) { console.warn('Powerbox action failed', err); }
+        try {
+          const handled = ShipRuntime.tryStartPowerboxRepair(interactTarget);
+          if (handled) return;
+        } catch (e) { /* fallthrough to default behavior */ }
+      }
+      // If we're looking at a locker, open the locker <-> player inventory UI
+      if (interactTarget && interactTarget.name === 'locker') {
+        try {
+          const openLockerUI = () => { try { if (window.playerInventory && typeof window.playerInventory.openLockerUI === 'function') window.playerInventory.openLockerUI(); else { Inventory.createInventoryUI(); Inventory.openInventory(); } } catch (err) { console.warn('Failed to open locker inventory', err); } };
+          if (window.playLockerOpen) {
+            window.playLockerOpen().then(() => { openLockerUI(); });
+          } else {
+            openLockerUI();
           }
-          powerboxInteracting = true;
-          interactHint.textContent = 'Repairing power...';
-          interactHint.style.display = 'block';
-        }
+        } catch (err) { console.warn('Failed to open locker inventory', err); }
         return;
       }
       if (interactTarget) playInteraction(interactTarget);
@@ -1407,6 +1151,26 @@ const FLOAT_DRAG = 0.6; // damping per second
 let oxygenLevel = 100.0; // percent
 const OXYGEN_DRAIN_RATE = 0.6; // percent per second while outside
 
+// --- Reset all movement key states on window blur to prevent stuck movement ---
+window.addEventListener('blur', () => {
+  // Reset float mode keys
+  try {
+    const obj = interiorControls.getObject();
+    if (obj && obj.userData && obj.userData.float && obj.userData.float.keyStates) {
+      for (const k in obj.userData.float.keyStates) obj.userData.float.keyStates[k] = false;
+      if (obj.userData.float.velocity) obj.userData.float.velocity.set(0,0,0);
+    }
+  } catch (e) {}
+  // Reset FPS mode keys
+  try {
+    const obj = interiorControls.getObject();
+    if (obj && obj.userData && obj.userData.fps && obj.userData.fps.keyStates) {
+      for (const k in obj.userData.fps.keyStates) obj.userData.fps.keyStates[k] = false;
+      if (obj.userData.fps.velocity) obj.userData.fps.velocity.set(0,0,0);
+    }
+  } catch (e) {}
+});
+
 // Flight parameters
 // tuned to make flying *feel* faster: higher accel/speed, stronger parallax and FOV kick
 const ACCEL = 360; // units/s^2 (was 160)
@@ -1416,10 +1180,20 @@ const ROTATION_SPEED = 0.0028; // mouse sensitivity
 const ROTATION_DAMPING = 6.0; // higher = tighter tracking
 const BANK_AMOUNT = 0.9; // roll when turning
 
+// Expose movement constants and state to window so external non-module helpers can control them
+try {
+  window.ACCEL = ACCEL;
+  window.MAX_SPEED = MAX_SPEED;
+  window.DRAG = DRAG;
+  window.ROTATION_SPEED = ROTATION_SPEED;
+  window.ROTATION_DAMPING = ROTATION_DAMPING;
+  window.BANK_AMOUNT = BANK_AMOUNT;
+} catch (e) {}
+
 // runtime state
 const velocity = new THREE.Vector3();
-let targetYaw = 0, targetPitch = 0;
-let yaw = 0, pitch = 0;
+// shared target for ship orientation (used by shipControls)
+const shipTarget = { yaw: 0, pitch: 0 };
 let lastMouse = { x:0, y:0 };
 
 // capture raw mouse movement while pointer locked
@@ -1427,10 +1201,10 @@ let lastMouse = { x:0, y:0 };
 document.addEventListener('mousemove', (e) => {
   // only control ship orientation when pointerlock belongs to the flight controls
   if (!controls.isLocked || !flyEnabled) return;
-  targetYaw -= e.movementX * ROTATION_SPEED;
-  targetPitch -= e.movementY * ROTATION_SPEED;
+  shipTarget.yaw -= e.movementX * ROTATION_SPEED;
+  shipTarget.pitch -= e.movementY * ROTATION_SPEED;
   // clamp pitch to prevent flipping
-  targetPitch = Math.max(-Math.PI/3, Math.min(Math.PI/3, targetPitch));
+  shipTarget.pitch = Math.max(-Math.PI/3, Math.min(Math.PI/3, shipTarget.pitch));
 });
 
 // Resize
@@ -1613,6 +1387,7 @@ document.addEventListener('keydown', (e) => {
   // if the player doesn't have a flashlight in inventory, ignore
   if (!inventory['flashlight'] || inventory['flashlight'].count <= 0) return;
   flashlightOn = !flashlightOn;
+  try { window.flashlightOn = flashlightOn; } catch (e) {}
 });
 
 // (Free camera input removed)
@@ -1624,255 +1399,330 @@ function animate(){
   last = now;
   // advance any animation mixers
   if (mixer) mixer.update(dt);
-  if (powerboxMixer) powerboxMixer.update(dt);
+  // let ShipRuntime advance any runtime mixers (powerbox) and update flashlight
+  try { ShipRuntime.update(dt, { activeCamera }); } catch (e) {}
+  // Update flashlight position and intensity (managed by module)
+  try { if (typeof Flashlight !== 'undefined' && Flashlight && typeof Flashlight.update === 'function') Flashlight.update(activeCamera); } catch (e) {}
   // update audio state based on oxygen UI visibility (outside when oxygen UI shown)
   try {
     const outsideFlag = !!(oxygenUI && oxygenUI.style && oxygenUI.style.display === 'block');
     if (audioSystem && audioSystem._inited) audioSystem.setOutside(outsideFlag);
   } catch (e) {}
-  // Smoothly approach target orientation (yaw/pitch kept even when not flying)
-  yaw += (targetYaw - yaw) * Math.min(1, ROTATION_DAMPING * dt);
-  pitch += (targetPitch - pitch) * Math.min(1, ROTATION_DAMPING * dt);
+  // Flight physics and camera follow handled by ShipControls
+  try { if (window.ShipControls && typeof ShipControls.update === 'function') ShipControls.update(dt); } catch (e) {}
 
-  // Compose ship orientation from smoothed yaw/pitch (available for camera/look and movement)
-  const shipEuler = new THREE.Euler(pitch, yaw, 0, 'YXZ');
-  const shipQuat = new THREE.Quaternion().setFromEuler(shipEuler);
-
-  // Forward/right/up in ship local space
-  const forwardVec = new THREE.Vector3(0,0,-1).applyQuaternion(shipQuat);
-  const rightVec = new THREE.Vector3(1,0,0).applyQuaternion(shipQuat);
-  const upVec = new THREE.Vector3(0,1,0).applyQuaternion(shipQuat);
-
-  // Compute thrust only when actively flying (not when inside). However, always
-  // apply drag and move the ship so it continues coasting while interior is active.
-  const accelVec = new THREE.Vector3();
-  // When power is out, block all thrust and zero velocity
-  if (!powerOut) {
-    if (flyEnabled && !interiorEnabled) {
-      // Thrust/strafe from player controls when flying
-      accelVec.addScaledVector(forwardVec, move.forward * ACCEL);
-      accelVec.addScaledVector(rightVec, move.right * ACCEL * 0.6);
-      accelVec.addScaledVector(upVec, move.up * ACCEL * 0.6);
-    }
-    // If autopilot is enabled while inside, add a continuous forward thrust
-    const AUTO_THRUST = 320; // continuous thrust while interior autopilot is enabled
-    if (interiorEnabled && interiorAutoThrust) {
-      accelVec.addScaledVector(forwardVec, AUTO_THRUST);
-    }
-  } else {
-    try { velocity.set(0,0,0); } catch (e) {}
-  }
-
-  // integrate velocity from any acceleration (or none) and always apply drag
-  velocity.addScaledVector(accelVec, dt);
-  const dragFactor = Math.max(0, 1 - DRAG * dt);
-  velocity.multiplyScalar(dragFactor);
-  // clamp speed
-  if (velocity.lengthSq() > (MAX_SPEED*MAX_SPEED)) velocity.setLength(MAX_SPEED);
-
-  // Always move the ship by its current velocity so the world moves while inside
-  ship.position.addScaledVector(velocity, dt);
-
-  // update near-star positions so they appear to move past the camera.
-  // Parallax is scaled with ship speed to amplify perceived velocity when looking at stars.
-  const speedFrac = Math.min(1, velocity.length() / MAX_SPEED);
-  const parallaxScale = 0.12 + speedFrac * 1.4; // base + stronger scale with speed
-  const shift = velocity.clone().multiplyScalar(-parallaxScale * dt);
-  const _camWorldPos = new THREE.Vector3();
-  activeCamera.getWorldPosition(_camWorldPos);
-  nearStars.position.copy(_camWorldPos);
-
-  // stronger FOV kick when moving fast to increase sense of speed (applies to main camera)
-  const fovValue = BASE_FOV + speedFrac * 18;
-  camera.fov = fovValue;
-  camera.updateProjectionMatrix();
-
-  // GPS tracking: update HUD and check if we've reached the freighter goal
-  if (gpsTracking && freighterGoal && freighterGoal.position) {
-    try {
-      const dist = ship.position.distanceTo(freighterGoal.position);
-      if (gpsHud) gpsHud.textContent = `GPS: ${Math.round(dist)}m`;
-      if (dist <= FREIGHTER_REACH_DISTANCE) {
-        // Player reached the freighter: remove target, open shop, allow next GPS
-        try { enableGPS(false); } catch (e) {}
-        try { scene.remove(freighterGoal); } catch (e) {}
-        freighterGoal = null;
-        try {
-          freighterShopBtn.style.display = 'inline-block';
-          openShop();
-        } catch (e) {}
-        if (gpsButton) { gpsButton.disabled = false; gpsButton.textContent = 'Set GPS Target'; }
+  // Toggle buite and binneWire collision/wireframe based on oxygen meter
+  try {
+    const buite = shipModel && shipModel.getObjectByName && shipModel.getObjectByName('buite');
+    const binneWire = shipModel && shipModel.getObjectByName && shipModel.getObjectByName('binneWire');
+    // Determine if player is inside any binneWire collision box
+    let playerInsideBinne = false;
+    if (binneWire && binneWire.userData && binneWire.userData.collisionBoxes) {
+      const obj = interiorControls.getObject();
+      for (const b of binneWire.userData.collisionBoxes) {
+        if (b.containsPoint(obj.position)) { playerInsideBinne = true; break; }
       }
-    } catch (e) { /* ignore GPS errors */ }
-  }
-
-  // Recycle stars that drift too far from the camera to create an "infinite" field.
-  _frameCounter++;
-  if ((_frameCounter & 3) === 0) { // every 4th frame: update positions in bulk
-    const attr = nearGeo.getAttribute('position');
-    for (let i = 0; i < attr.count; i++) {
-      let lx = attr.getX(i) + shift.x;
-      let ly = attr.getY(i) + shift.y;
-      let lz = attr.getZ(i) + shift.z;
-      const d2 = lx*lx + ly*ly + lz*lz;
-      if (d2 > _replaceRadiusSq) {
-        const p = randPointInSphere(NEAR_STAR_RADIUS, MIN_NEAR_STAR_DISTANCE);
-        lx = p[0]; ly = p[1]; lz = p[2];
-      }
-      attr.setXYZ(i, lx, ly, lz);
     }
-    attr.needsUpdate = true;
-  }
-
-  // smoothly rotate ship to face movement/orientation
-  ship.quaternion.slerp(shipQuat, Math.min(1, ROTATION_DAMPING * dt));
-
-  // banking/roll: based on lateral velocity and yaw rate
-  const localVel = velocity.clone().applyQuaternion(ship.quaternion.clone().invert());
-  const bank = THREE.MathUtils.clamp(-localVel.x / 60, -1, 1) * BANK_AMOUNT;
-  if (shipModel) {
-    shipModel.rotation.z += (bank - shipModel.rotation.z) * Math.min(1, 6 * dt);
-  }
-
-  // smooth camera follow: desired pivot is behind the ship in ship space
-  const desiredCamPos = new THREE.Vector3(0, 2, 10);
-  cameraPivot.position.lerp(desiredCamPos, Math.min(1, 6 * dt));
-  // point camera further toward ship forward to emphasize motion
-  const lookAtPos = ship.position.clone().add(forwardVec.clone().multiplyScalar(30));
-  camera.lookAt(lookAtPos);
-
-  // Choose active camera: prefer interior FP when inside, otherwise use main camera.
-  if (interiorEnabled) {
-    activeCamera = fpCamera;
-  } else {
-    activeCamera = camera;
-  }
-
-  // interior walking movement (simple collision against the computed binn
-  if (interiorEnabled && interiorBox) {
-    // ensure interiorBox is derived from the fixed base box (applies any config)
-    if (baseInteriorBox) computeInteriorBoxFromBin();
-    // make sure ship/world matrices are up-to-date so collision boxes
-    // and raycasts operate on current transforms while autopilot moves the ship
+    // buite: only visible/collidable when outside
+    if (buite) {
+      if (!playerInsideBinne) {
+        buite.userData.collidable = true;
+      } else {
+        buite.userData.collidable = false;
+      }
+          // Always set visibility by config
+          try { if (window.ShipEntry && ShipEntry.applyBuiteVisibility) ShipEntry.applyBuiteVisibility(shipModel, interiorConfig); } catch (e) {}
+    }
+    // binneWire: only visible/collidable when inside
+    if (binneWire) {
+      if (playerInsideBinne) {
+        binneWire.userData.collidable = true;
+      } else {
+        binneWire.userData.collidable = false;
+      }
+      // Always set visibility by config
+      try { if (window.ShipEntry && ShipEntry.applyBuiteVisibility) ShipEntry.applyBuiteVisibility(shipModel, interiorConfig); } catch (e) {}
+    }
+  } catch (e) {}
+  // --- INTERIOR: FPS walking/jumping (binneWire) ---
+  if (interiorEnabled && (!interiorFloat)) {
     ship.updateMatrixWorld(true);
     const obj = interiorControls.getObject();
-    const walkSpeed = 3.0; // meters per second inside
-    // Compute movement vectors in ship-local space. Convert the FP camera's
-    // world forward into the ship-local frame so adding to the FP object's
-    // local position produces the expected walk direction regardless of
-    // ship rotation/banking caused while flying.
-    const forwardWorld = new THREE.Vector3();
-    fpCamera.getWorldDirection(forwardWorld);
-    const shipQuatInv = ship.quaternion.clone().invert();
-    const forwardLocal = forwardWorld.clone().applyQuaternion(shipQuatInv);
-    forwardLocal.y = 0;
-    if (forwardLocal.lengthSq() === 0) forwardLocal.set(0,0,-1);
-    forwardLocal.normalize();
-    const rightLocal = new THREE.Vector3().crossVectors(forwardLocal, new THREE.Vector3(0,1,0)).normalize();
-    const upLocal = new THREE.Vector3(0,1,0);
-
-    // Refresh interiorBox from base if available
-    const min = interiorBox.min.clone();
-    const max = interiorBox.max.clone();
-    min.y += 0.1; max.y -= 0.1;
-
-    // Detect whether player is inside the canonical interior box
-    const wasFloat = interiorFloat;
-    const nowInside = interiorBox.containsPoint(obj.position);
-    if (!nowInside) {
-      if (!interiorFloat) {
-        interiorFloat = true;
-        interiorFloatVelocity.set(0,0,0);
-      }
-    } else {
-      if (interiorFloat) {
-        interiorFloat = false;
-        interiorFloatVelocity.set(0,0,0);
-      }
+    if (!obj.userData.fps) {
+      obj.userData.fps = {
+        velocity: new THREE.Vector3(),
+        onGround: false,
+        jumpSpeed: 4.2,
+        speed: 3.0,
+        gravity: 9.8,
+        keyStates: { W: false, A: false, S: false, D: false, Space: false }
+      };
     }
-
-    if (!interiorFloat) {
-      // walking mode (original behavior)
-      const moveVec = new THREE.Vector3();
-      moveVec.addScaledVector(forwardLocal, move.forward);
-      moveVec.addScaledVector(rightLocal, move.right);
-      moveVec.addScaledVector(upLocal, move.up * 0.8);
-      if (moveVec.lengthSq() > 0) {
-        moveVec.normalize();
-        const proposed = obj.position.clone().addScaledVector(moveVec, walkSpeed * dt);
-        // simple collision test against cab boxes: if moving would intersect, cancel movement
-        let blocked = false;
-        const checks = [cabL, cabR, exitDoor].filter(Boolean);
-        for (const c of checks) {
-          if (c.userData && c.userData.collidable === false) continue;
-          const b = c.userData && c.userData.localBox ? c.userData.localBox : null;
-          if (b && sphereIntersectsBox(proposed, PLAYER_RADIUS, b)) { blocked = true; break; }
-        }
-        if (!blocked) {
-          // Allow rear exit slice beyond the back face up to configured depth
-          let finalPos = proposed.clone();
-          try {
-            const exitCfg = interiorConfig && interiorConfig.exit ? interiorConfig.exit : null;
-            if (exitCfg && exitCfg.enabled) {
-              const centerX = (min.x + max.x) * 0.5;
-              const halfW = (exitCfg.width || 1.0) * 0.5;
-              const yMin = min.y;
-              const yMax = max.y;
-              const nearBack = proposed.z > (max.z - 0.2);
-              const withinX = (proposed.x >= (centerX - halfW) && proposed.x <= (centerX + halfW));
-              const withinY = (proposed.y >= yMin && proposed.y <= yMax);
-              if (nearBack && withinX && withinY) {
-                const maxAllowedZ = max.z + (exitCfg.depth || 2.0);
-                finalPos.z = Math.min(proposed.z, maxAllowedZ);
-                finalPos.x = Math.max(min.x, Math.min(max.x, finalPos.x));
-                finalPos.y = Math.max(yMin, Math.min(yMax, finalPos.y));
-              } else {
-                finalPos.clamp(min, max);
-              }
-            } else {
-              finalPos.clamp(min, max);
-            }
-          } catch (e) { finalPos.clamp(min, max); }
-          obj.position.copy(finalPos);
-        }
+    const fps = obj.userData.fps;
+    if (!fps._listener) {
+      fps._listener = true;
+      window.addEventListener('keydown', e => {
+        if (!interiorEnabled) return;
+        if (e.code === 'KeyW') fps.keyStates.W = true;
+        if (e.code === 'KeyA') fps.keyStates.A = true;
+        if (e.code === 'KeyS') fps.keyStates.S = true;
+        if (e.code === 'KeyD') fps.keyStates.D = true;
+        if (e.code === 'Space') fps.keyStates.Space = true;
+      });
+      window.addEventListener('keyup', e => {
+        if (!interiorEnabled) return;
+        if (e.code === 'KeyW') fps.keyStates.W = false;
+        if (e.code === 'KeyA') fps.keyStates.A = false;
+        if (e.code === 'KeyS') fps.keyStates.S = false;
+        if (e.code === 'KeyD') fps.keyStates.D = false;
+        if (e.code === 'Space') fps.keyStates.Space = false;
+      });
+    }
+    // Get collision boxes from binneWire (with robust checks)
+    let binneBoxes = [];
+    try {
+      const binneWire = shipModel && shipModel.getObjectByName && shipModel.getObjectByName('binneWire');
+      if (
+        binneWire &&
+        binneWire.userData &&
+        Array.isArray(binneWire.userData.collisionBoxes) &&
+        binneWire.userData.collisionBoxes.length > 0 &&
+        binneWire.userData.collidable === true
+      ) {
+        binneBoxes = binneWire.userData.collisionBoxes;
       }
-    } else {
-      // Zero-gravity floating mode: apply simple thruster-style controls with inertia
-      const accel = new THREE.Vector3();
-      accel.addScaledVector(forwardLocal, move.forward * FLOAT_ACCEL);
-      accel.addScaledVector(rightLocal, move.right * FLOAT_ACCEL);
-      accel.addScaledVector(upLocal, move.up * FLOAT_ACCEL);
-      // Integrate velocity
-      interiorFloatVelocity.addScaledVector(accel, dt);
-      // apply damping
-      interiorFloatVelocity.multiplyScalar(Math.max(0, 1 - FLOAT_DRAG * dt));
-      // propose new position
-      const proposed = obj.position.clone().addScaledVector(interiorFloatVelocity, dt);
-      let collided = false;
-      try {
-        // only check buite collisions when buite is present and collidable
-        const buiteObj = shipModel.getObjectByName('buite');
-        if (buiteObj && buiteObj.userData && buiteObj.userData.collisionBoxes && buiteObj.userData.collidable) {
-          for (const b of buiteObj.userData.collisionBoxes) {
-            if (sphereIntersectsBox(proposed, PLAYER_RADIUS, b)) { collided = true; break; }
+    } catch (e) { binneBoxes = []; }
+    // Find the furthest back face (max z)
+    let maxBackZ = -Infinity;
+    for (const b of binneBoxes) {
+      if (b.max.z > maxBackZ) maxBackZ = b.max.z;
+    }
+    // FPS movement logic
+      // Calculate movement relative to camera in ship-local space
+      const forwardWorld = new THREE.Vector3();
+      fpCamera.getWorldDirection(forwardWorld);
+      // Remove ship rotation from camera direction
+      const shipInvQuat = ship.quaternion.clone().invert();
+      forwardWorld.applyQuaternion(shipInvQuat);
+      forwardWorld.y = 0; forwardWorld.normalize();
+      const rightWorld = new THREE.Vector3().crossVectors(forwardWorld, fpCamera.up.clone().applyQuaternion(shipInvQuat)).normalize();
+      const move = new THREE.Vector3();
+      if (fps.keyStates.W) move.add(forwardWorld);
+      if (fps.keyStates.S) move.addScaledVector(forwardWorld, -1);
+      if (fps.keyStates.A) move.addScaledVector(rightWorld, -1);
+      if (fps.keyStates.D) move.add(rightWorld);
+      if (move.lengthSq() > 0) move.normalize();
+    if (fps.keyStates.Space && fps.onGround) {
+      fps.velocity.y = fps.jumpSpeed;
+      fps.onGround = false;
+    }
+    fps.velocity.x = move.x * fps.speed;
+    fps.velocity.z = move.z * fps.speed;
+    fps.velocity.y -= fps.gravity * dt;
+    const nextPos = obj.position.clone().addScaledVector(fps.velocity, dt);
+    // Allow walking out the furthest back face (max z) only
+    let insideAny = false;
+    let onGround = false;
+    for (const b of binneBoxes) {
+      const margin = 0.06; // Increased margin for stricter collision
+      // If nextPos.z is beyond the maxBackZ face, allow exit (do not block)
+      const isBackExit = (nextPos.z > maxBackZ - 0.05);
+      // Check if inside box (with margin), or at exit
+      if (
+        nextPos.x > b.min.x + margin && nextPos.x < b.max.x - margin &&
+        nextPos.z > b.min.z + margin && (nextPos.z < b.max.z - margin || isBackExit)
+      ) {
+        if (nextPos.y <= b.max.y + margin && nextPos.y >= b.min.y - margin) {
+          insideAny = true;
+          // Clamp position to stay inside walls (except exit)
+          if (!isBackExit) {
+            nextPos.x = Math.max(b.min.x + margin, Math.min(nextPos.x, b.max.x - margin));
+            nextPos.z = Math.max(b.min.z + margin, Math.min(nextPos.z, b.max.z - margin));
+          }
+          if (nextPos.y <= b.min.y + 3.5) {
+            nextPos.y = b.min.y + 3.5;
+            fps.velocity.y = 0;
+            onGround = true;
           }
         }
-      } catch (e) { /* ignore collision test errors */ }
-      if (!collided) {
-        obj.position.copy(proposed);
-      } else {
-        // simple collision response: stop velocity when hitting buite
-        interiorFloatVelocity.set(0,0,0);
-      }
-      // If we've returned inside the canonical interior box, snap back to walking mode
-      if (interiorBox.containsPoint(obj.position)) {
-        interiorFloat = false;
-        // clamp inside
-        obj.position.clamp(min, max);
-        interiorFloatVelocity.set(0,0,0);
       }
     }
-    // ensure fpCamera matches any FOV change if desired
+    if (insideAny) {
+      obj.position.copy(nextPos);
+      fps.onGround = onGround;
+      // If after moving, player is outside all boxes, instantly enter float mode
+      let nowInside = false;
+      for (const b of binneBoxes) {
+        if (b.containsPoint(obj.position)) { nowInside = true; break; }
+      }
+      if (!nowInside) {
+        interiorFloat = true;
+        interiorFloatVelocity.set(0,0,0);
+        // Optionally clear FPS velocity to avoid carryover
+        fps.velocity.set(0,0,0);
+      }
+    } else {
+      // Instantly enter float mode if not inside any box
+      interiorFloat = true;
+      interiorFloatVelocity.set(0,0,0);
+      fps.velocity.set(0,0,0);
+    }
+    fpCamera.fov = BASE_FOV; fpCamera.updateProjectionMatrix();
+  }
+
+  // --- FLOAT MODE: zero gravity movement and buite.glb collision when outside ---
+  if (interiorEnabled && interiorFloat) {
+    const obj = interiorControls.getObject();
+    // Zero gravity controls: WASD for horizontal, Space for up, Q for down
+    if (!obj.userData.float) {
+      obj.userData.float = {
+        velocity: new THREE.Vector3(),
+        keyStates: { W: false, A: false, S: false, D: false, Space: false, Q: false }
+      };
+    }
+    const float = obj.userData.float;
+    if (!float._listener) {
+      float._listener = true;
+      window.addEventListener('keydown', e => {
+        if (!(interiorEnabled && interiorFloat)) return;
+        if (e.code === 'KeyW') float.keyStates.W = true;
+        if (e.code === 'KeyA') float.keyStates.A = true;
+        if (e.code === 'KeyS') float.keyStates.S = true;
+        if (e.code === 'KeyD') float.keyStates.D = true;
+        if (e.code === 'Space') float.keyStates.Space = true;
+        if (e.code === 'KeyQ') float.keyStates.Q = true;
+      });
+      window.addEventListener('keyup', e => {
+        if (!(interiorEnabled && interiorFloat)) return;
+        if (e.code === 'KeyW') float.keyStates.W = false;
+        if (e.code === 'KeyA') float.keyStates.A = false;
+        if (e.code === 'KeyS') float.keyStates.S = false;
+        if (e.code === 'KeyD') float.keyStates.D = false;
+        if (e.code === 'Space') float.keyStates.Space = false;
+        if (e.code === 'KeyQ') float.keyStates.Q = false;
+      });
+    }
+    // Get direction vectors
+      // Calculate movement relative to camera in ship-local space
+      const forwardWorld = new THREE.Vector3();
+      fpCamera.getWorldDirection(forwardWorld);
+      // Remove ship rotation from camera direction
+      const shipInvQuat = ship.quaternion.clone().invert();
+      forwardWorld.applyQuaternion(shipInvQuat);
+      forwardWorld.y = 0; forwardWorld.normalize();
+      const rightWorld = new THREE.Vector3().crossVectors(forwardWorld, fpCamera.up.clone().applyQuaternion(shipInvQuat)).normalize();
+      const upWorld = new THREE.Vector3(0,1,0); // up is always Y in ship-local
+    // Movement (inertia-based for realism)
+    const accel = new THREE.Vector3();
+    if (float.keyStates.W) accel.add(forwardWorld);
+    if (float.keyStates.S) accel.addScaledVector(forwardWorld, -1);
+    if (float.keyStates.A) accel.addScaledVector(rightWorld, -1);
+    if (float.keyStates.D) accel.add(rightWorld);
+    if (float.keyStates.Space) accel.add(upWorld);
+    if (float.keyStates.Q) accel.addScaledVector(upWorld, -1);
+    if (accel.lengthSq() > 0) accel.normalize();
+    // Acceleration and drag
+    const FLOAT_ACCEL = 7.0; // units/s^2
+    const FLOAT_DRAG = 0.18; // lower = more floaty
+    float.velocity.addScaledVector(accel, FLOAT_ACCEL * dt);
+    // Apply gentle drag
+    float.velocity.multiplyScalar(Math.max(0, 1 - FLOAT_DRAG * dt));
+    // Clamp max float speed
+    const MAX_FLOAT_SPEED = 6.5;
+    if (float.velocity.lengthSq() > MAX_FLOAT_SPEED * MAX_FLOAT_SPEED) float.velocity.setLength(MAX_FLOAT_SPEED);
+    // Predict next position
+    const proposed = obj.position.clone().addScaledVector(float.velocity, dt);
+    // buite.glb collision (with robust checks)
+    let collided = false;
+    try {
+      const buiteObj = shipModel && shipModel.getObjectByName && shipModel.getObjectByName('buite');
+      if (
+        buiteObj &&
+        buiteObj.userData &&
+        Array.isArray(buiteObj.userData.collisionBoxes) &&
+        buiteObj.userData.collisionBoxes.length > 0 &&
+        buiteObj.userData.collidable === true
+      ) {
+        for (const b of buiteObj.userData.collisionBoxes) {
+          if (sphereIntersectsBox(proposed, PLAYER_RADIUS, b)) { collided = true; break; }
+        }
+      }
+    } catch (e) { collided = false; }
+    // --- NEW: check for binneWire collision to re-enter FPS mode ---
+    let reenterBin = false;
+    let binneBoxes = [];
+    try {
+      const binneWire = shipModel && shipModel.getObjectByName && shipModel.getObjectByName('binneWire');
+      if (
+        binneWire &&
+        binneWire.userData &&
+        Array.isArray(binneWire.userData.collisionBoxes) &&
+        binneWire.userData.collisionBoxes.length > 0 &&
+        binneWire.userData.collidable === true
+      ) {
+        binneBoxes = binneWire.userData.collisionBoxes;
+      }
+    } catch (e) { binneBoxes = []; }
+    for (const b of binneBoxes) {
+      if (sphereIntersectsBox(proposed, PLAYER_RADIUS, b)) { reenterBin = true; break; }
+    }
+    if (reenterBin) {
+      // Robustly switch to FPS mode and reset all state
+      interiorFloat = false;
+      float.velocity.set(0,0,0);
+      const objFPS = interiorControls.getObject();
+      // Reset FPS state
+      if (!objFPS.userData.fps) {
+        objFPS.userData.fps = {
+          velocity: new THREE.Vector3(),
+          onGround: false,
+          jumpSpeed: 4.2,
+          speed: 3.0,
+          gravity: 9.8,
+          keyStates: { W: false, A: false, S: false, D: false, Space: false }
+        };
+      }
+      const fps = objFPS.userData.fps;
+      fps.velocity.set(0,0,0);
+      // Place player at the entry point
+      objFPS.position.copy(proposed);
+      // Try to ground the player if possible
+      let grounded = false;
+      for (const b of binneBoxes) {
+        if (b.containsPoint(objFPS.position)) {
+          // Place player just above the floor
+          objFPS.position.y = Math.max(objFPS.position.y, b.min.y + 3.5);
+          grounded = true;
+          break;
+        }
+      }
+      fps.onGround = grounded;
+      // Failsafe: ensure only binneWire collision is enabled, buite is disabled
+      try {
+        const buite = shipModel && shipModel.getObjectByName && shipModel.getObjectByName('buite');
+        if (buite) {
+          buite.userData.collidable = false;
+          try { if (window.ShipEntry && ShipEntry.applyBuiteVisibility) ShipEntry.applyBuiteVisibility(shipModel, interiorConfig); } catch (e) {}
+        }
+        const binneWire = shipModel && shipModel.getObjectByName && shipModel.getObjectByName('binneWire');
+        if (binneWire) {
+          binneWire.userData.collidable = true;
+          try { if (window.ShipEntry && ShipEntry.applyBuiteVisibility) ShipEntry.applyBuiteVisibility(shipModel, interiorConfig); } catch (e) {}
+        }
+      } catch (e) {}
+      // Failsafe: ensure no float state lingers
+      objFPS.userData.float = undefined;
+    } else if (!collided) {
+      obj.position.copy(proposed);
+    } else {
+      // stop at collision (only the direction that hit)
+      // Try to slide along the surface by zeroing the velocity component that caused the collision
+      // We'll do a simple approach: zero velocity in the direction of the attempted move
+      const diff = proposed.clone().sub(obj.position);
+      if (Math.abs(diff.x) > Math.abs(diff.y) && Math.abs(diff.x) > Math.abs(diff.z)) float.velocity.x = 0;
+      else if (Math.abs(diff.y) > Math.abs(diff.x) && Math.abs(diff.y) > Math.abs(diff.z)) float.velocity.y = 0;
+      else float.velocity.z = 0;
+    }
     fpCamera.fov = BASE_FOV; fpCamera.updateProjectionMatrix();
   }
 
@@ -1924,17 +1774,19 @@ function animate(){
       }
     } catch (err) { /* ignore auto-door errors */ }
   }
-  if (activeCamera && (pilot || cabL || cabR || powerbox)) {
+  if (activeCamera && (pilot || cabL || cabR || window.powerbox)) {
     raycaster.setFromCamera(new THREE.Vector2(0, 0), activeCamera);
     const targets = [];
     if (pilot) targets.push(pilot);
     if (interiorEnabled) targets.push(cabL, cabR, exitDoor);
-    if (powerbox) targets.push(powerbox);
+    if (window.powerbox) targets.push(window.powerbox);
+    // include the full ship model so named children like `locker` can be targeted
+    if (typeof shipModel !== 'undefined' && shipModel) targets.push(shipModel);
     const intersects = raycaster.intersectObjects(targets.filter(Boolean), true);
       if (intersects.length > 0) {
       let obj = intersects[0].object;
-      // climb to the root named object (cabL/cabR/pilot)
-      while (obj && obj !== shipModel && obj.name !== 'cabL' && obj.name !== 'cabR' && obj.name !== 'pilot' && obj.name !== 'powerbox' && obj.name !== 'EXIT') obj = obj.parent;
+      // climb to the root named object (cabL/cabR/pilot/powerbox/locker)
+      while (obj && obj !== shipModel && obj.name !== 'cabL' && obj.name !== 'cabR' && obj.name !== 'pilot' && obj.name !== 'powerbox' && obj.name !== 'EXIT' && obj.name !== 'locker') obj = obj.parent;
       // Do not show or set a press-E hint for cab doors or EXIT — they open/close automatically.
       if (obj && (obj.name === 'cabL' || obj.name === 'cabR' || obj.name === 'EXIT')) {
         interactTarget = null;
@@ -1959,7 +1811,7 @@ function animate(){
             if (circVal < 50) {
               interactTarget = obj;
               // show hint; if the animation is playing show a generic 'repairing' message
-              if (powerboxInteracting) {
+              if (window.powerboxInteracting) {
                 interactHint.textContent = 'Repairing power...';
               } else {
                 interactHint.textContent = 'Press E to repair power';
@@ -1975,85 +1827,40 @@ function animate(){
             interactTarget = null;
             interactHint.style.display = 'none';
           }
+      } else if (obj && obj.name === 'locker') {
+        const camPos = new THREE.Vector3(); activeCamera.getWorldPosition(camPos);
+        const dist = camPos.distanceTo(intersects[0].point);
+        if (dist <= INTERACT_DISTANCE) {
+          interactTarget = obj;
+          interactHint.textContent = 'Press E to open locker';
+          interactHint.style.display = 'block';
+        } else {
+          interactTarget = null;
+          interactHint.style.display = 'none';
+        }
       } else {
         interactTarget = null;
         interactHint.style.display = 'none';
       }
+      // Auto-close ship locker UI if player walks away while it's open
+      try {
+        const lockerUiEl = document.getElementById('player-inventory-ui-locker');
+        if (lockerUiEl && lockerUiEl.style.display === 'block') {
+          if (lockerDoor && activeCamera) {
+            const camPos = new THREE.Vector3(); activeCamera.getWorldPosition(camPos);
+            const doorPos = new THREE.Vector3(); lockerDoor.getWorldPosition(doorPos);
+            const dist = camPos.distanceTo(doorPos);
+            if (dist > INTERACT_DISTANCE + 0.2) {
+              try { if (window.playerInventory && typeof window.playerInventory.closeLockerUI === 'function') window.playerInventory.closeLockerUI(); else { Inventory.closeInventory && Inventory.closeInventory(); } } catch (e) {}
+            }
+          }
+        }
+      } catch (e) {}
     } else {
       interactTarget = null;
       interactHint.style.display = 'none';
     }
   }
-
-  // Update GPS HUD/marker if tracking is enabled
-  if (gpsTracking && freighterGoal && activeCamera) {
-    try {
-      const camPos = new THREE.Vector3(); activeCamera.getWorldPosition(camPos);
-      const dist = Math.max(0, Math.round(camPos.distanceTo(freighterGoal.position)));
-      // If close enough, consider the freighter reached — open the shop UI
-      if (dist <= FREIGHTER_REACH_DISTANCE) {
-        // stop tracking but keep the freighter model in the world (player can inspect)
-        gpsTracking = false;
-        if (gpsHud) {
-          gpsHud.textContent = 'Freighter reached!';
-          setTimeout(() => { if (gpsHud) gpsHud.style.display = 'none'; }, 2800);
-        }
-        if (gpsButton) { gpsButton.disabled = true; gpsButton.textContent = 'GPS: Active'; }
-        try {
-          openShop();
-          if (freighterShopBtn) freighterShopBtn.style.display = 'inline-block';
-        } catch (err) { console.warn('Failed to open shop UI', err); }
-      }
-
-      // Determine whether the target is in front of the camera. If it's behind,
-      // projecting will mirror the coordinates and make it appear 'twice' on screen.
-      const camDir = new THREE.Vector3(); activeCamera.getWorldDirection(camDir);
-      const toTarget = freighterGoal.position.clone().sub(camPos);
-      const inFront = camDir.dot(toTarget) > 0;
-
-      if (!inFront) {
-        // Target is behind the camera: avoid projecting (which mirrors position).
-        if (gpsHud) {
-          gpsHud.style.left = '12px';
-          gpsHud.style.top = '12px';
-          gpsHud.textContent = `Freighter: ${dist}m (behind)`;
-        }
-      } else {
-        // Target is in front: project to screen and show HUD near the target.
-        const sp = freighterGoal.position.clone().project(activeCamera);
-        const sx = (sp.x * 0.5 + 0.5) * window.innerWidth;
-        const sy = (-sp.y * 0.5 + 0.5) * window.innerHeight;
-        if (gpsHud) {
-          gpsHud.style.left = Math.min(Math.max(8, sx), window.innerWidth - 140) + 'px';
-          gpsHud.style.top = Math.min(Math.max(8, sy), window.innerHeight - 32) + 'px';
-          gpsHud.textContent = `Freighter: ${dist}m`;
-        }
-      }
-    } catch (err) { /* ignore GPS update errors */ }
-  }
-  // If a freighter exists, toggle the small reopen button by proximity even when GPS tracking is off
-  if (freighterGoal && activeCamera) {
-    try {
-      const camPos2 = new THREE.Vector3(); activeCamera.getWorldPosition(camPos2);
-      const d2 = Math.max(0, Math.round(camPos2.distanceTo(freighterGoal.position)));
-      const nearEnough = d2 <= (FREIGHTER_REACH_DISTANCE * 1.5);
-      if (freighterShopBtn) freighterShopBtn.style.display = nearEnough ? 'inline-block' : 'none';
-    } catch (e) { /* ignore */ }
-  }
-  // Update flashlight transform + battery drain
-  try {
-    if (flashlight) {
-      const camPos = new THREE.Vector3();
-      activeCamera.getWorldPosition(camPos);
-      const camDir = new THREE.Vector3();
-      activeCamera.getWorldDirection(camDir);
-      flashlight.position.copy(camPos);
-      flashlight.target.position.copy(camPos.clone().add(camDir.multiplyScalar(30)));
-      flashlight.target.updateMatrixWorld();
-      // battery no longer drains — flashlight simply toggles on/off
-      flashlight.intensity = flashlightOn ? 3.0 : 0;
-    }
-  } catch (err) { /* ignore flashlight update errors */ }
 
   // powerbox animation completion now handled via the mixer 'finished' event
 
